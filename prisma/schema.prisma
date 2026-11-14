@@ -1,0 +1,131 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  OWNER
+  MANAGER
+  INVENTORY_STAFF
+  READ_ONLY
+}
+
+enum MovementType {
+  OPENING
+  RECEIPT
+  ISSUE
+  CUSTOMER_RETURN
+  SUPPLIER_RETURN
+  DAMAGE
+  EXPIRED
+  ADJUSTMENT
+  REVERSAL
+}
+
+model Organization {
+  id         String       @id @default(cuid())
+  name       String
+  slug       String       @unique
+  timezone   String       @default("Africa/Lagos")
+  currency   String       @default("NGN")
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+  memberships Membership[]
+  products   Product[]
+}
+
+model User {
+  id        String       @id @default(cuid())
+  email     String?      @unique
+  phone     String?      @unique
+  passwordHash String?
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+  memberships Membership[]
+}
+
+model Membership {
+  organizationId String
+  userId         String
+  role           Role          @default(READ_ONLY)
+  active         Boolean       @default(true)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  user           User         @relation(fields: [userId], references: [id])
+
+  @@id([organizationId, userId])
+  @@index([userId, active])
+}
+
+model Product {
+  id               String         @id @default(cuid())
+  organizationId   String
+  name             String
+  normalizedName   String
+  brand            String?
+  strength         String?
+  dosageForm       String?
+  packSize         String?
+  unit             String
+  reorderThreshold Decimal?      @db.Decimal(14, 3)
+  active           Boolean        @default(true)
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  organization     Organization   @relation(fields: [organizationId], references: [id])
+  batches          Batch[]
+
+  @@index([organizationId, normalizedName])
+}
+
+model Batch {
+  id             String         @id @default(cuid())
+  organizationId String
+  productId      String
+  batchNumber    String?
+  expiryDate     DateTime?
+  unit           String
+  unitCost       Decimal?       @db.Decimal(14, 2)
+  sellingPrice   Decimal?       @db.Decimal(14, 2)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  product        Product        @relation(fields: [productId], references: [id])
+  balance        BatchBalance?
+  movements      StockMovement[]
+
+  @@index([organizationId, expiryDate])
+  @@index([organizationId, productId])
+}
+
+model StockMovement {
+  id              String       @id @default(cuid())
+  organizationId  String
+  batchId         String
+  type            MovementType
+  quantityDelta   Decimal      @db.Decimal(14, 3)
+  reason          String?
+  actorId         String?
+  idempotencyKey  String
+  reversalOfId    String?
+  occurredAt      DateTime     @default(now())
+  batch           Batch        @relation(fields: [batchId], references: [id])
+
+  @@unique([organizationId, idempotencyKey])
+  @@index([organizationId, batchId, occurredAt])
+}
+
+model BatchBalance {
+  id             String       @id @default(cuid())
+  organizationId String
+  batchId        String       @unique
+  quantity       Decimal      @db.Decimal(14, 3)
+  version        Int          @default(1)
+  updatedAt      DateTime     @updatedAt
+  batch          Batch        @relation(fields: [batchId], references: [id])
+
+  @@index([organizationId])
+}
