@@ -14,9 +14,14 @@ Email and password authentication with short-lived access tokens and rotating re
 
 Role-based access control resolved from the organization membership. Permissions are enforced server-side.
 
+- `JwtAuthGuard` validates the bearer token and attaches the JWT payload (including `organisationId`) to the request.
+- `RolesGuard` reads `@Roles(...)` metadata and verifies the caller's active organization membership role.
+
 ## Guards
 
 The JWT auth guard validates the bearer token and attaches the payload to the request.
+
+The roles guard enforces per-endpoint allowed roles, for example owner and manager for product updates, and owner, manager, and inventory staff for stock mutations.
 
 ## Audit
 

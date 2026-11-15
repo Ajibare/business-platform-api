@@ -27,25 +27,30 @@ enum MovementType {
 }
 
 model Organization {
-  id         String       @id @default(cuid())
-  name       String
-  slug       String       @unique
-  timezone   String       @default("Africa/Lagos")
-  currency   String       @default("NGN")
-  createdAt  DateTime     @default(now())
-  updatedAt  DateTime     @updatedAt
-  memberships Membership[]
-  products   Product[]
+  id              String          @id @default(cuid())
+  name            String
+  slug            String          @unique
+  timezone        String          @default("Africa/Lagos")
+  currency        String          @default("NGN")
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  memberships     Membership[]
+  products        Product[]
+  batches         Batch[]
+  movements       StockMovement[]
+  batchBalances   BatchBalance[]
+  suppliers       Supplier[]
+  receipts        StockReceipt[]
 }
 
 model User {
-  id        String       @id @default(cuid())
-  email     String?      @unique
-  phone     String?      @unique
+  id           String        @id @default(cuid())
+  email        String?       @unique
+  phone        String?       @unique
   passwordHash String?
-  createdAt DateTime     @default(now())
-  updatedAt DateTime     @updatedAt
-  memberships Membership[]
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  memberships  Membership[]
 }
 
 model Membership {
@@ -53,17 +58,17 @@ model Membership {
   userId         String
   role           Role          @default(READ_ONLY)
   active         Boolean       @default(true)
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
-  organization   Organization @relation(fields: [organizationId], references: [id])
-  user           User         @relation(fields: [userId], references: [id])
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  organization   Organization  @relation(fields: [organizationId], references: [id])
+  user           User          @relation(fields: [userId], references: [id])
 
   @@id([organizationId, userId])
   @@index([userId, active])
 }
 
 model Product {
-  id               String         @id @default(cuid())
+  id               String             @id @default(cuid())
   organizationId   String
   name             String
   normalizedName   String
@@ -72,12 +77,13 @@ model Product {
   dosageForm       String?
   packSize         String?
   unit             String
-  reorderThreshold Decimal?      @db.Decimal(14, 3)
-  active           Boolean        @default(true)
-  createdAt        DateTime       @default(now())
-  updatedAt        DateTime       @updatedAt
-  organization     Organization   @relation(fields: [organizationId], references: [id])
+  reorderThreshold Decimal?          @db.Decimal(14, 3)
+  active           Boolean           @default(true)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  organization     Organization      @relation(fields: [organizationId], references: [id])
   batches          Batch[]
+  receiptLines     StockReceiptLine[]
 
   @@index([organizationId, normalizedName])
 }
@@ -93,9 +99,10 @@ model Batch {
   sellingPrice   Decimal?       @db.Decimal(14, 2)
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
-  product        Product        @relation(fields: [productId], references: [id])
-  balance        BatchBalance?
-  movements      StockMovement[]
+  organization    Organization   @relation(fields: [organizationId], references: [id])
+  product         Product        @relation(fields: [productId], references: [id])
+  balance         BatchBalance?
+  movements       StockMovement[]
 
   @@index([organizationId, expiryDate])
   @@index([organizationId, productId])
@@ -112,6 +119,7 @@ model StockMovement {
   idempotencyKey  String
   reversalOfId    String?
   occurredAt      DateTime     @default(now())
+  organization    Organization @relation(fields: [organizationId], references: [id])
   batch           Batch        @relation(fields: [batchId], references: [id])
 
   @@unique([organizationId, idempotencyKey])
@@ -125,7 +133,88 @@ model BatchBalance {
   quantity       Decimal      @db.Decimal(14, 3)
   version        Int          @default(1)
   updatedAt      DateTime     @updatedAt
+  organization    Organization @relation(fields: [organizationId], references: [id])
   batch          Batch        @relation(fields: [batchId], references: [id])
 
   @@index([organizationId])
+}
+
+model Supplier {
+  id             String         @id @default(cuid())
+  organizationId String
+  name           String
+  phone          String?
+  email          String?
+  active         Boolean        @default(true)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  organization   Organization   @relation(fields: [organizationId], references: [id])
+  receipts       StockReceipt[]
+
+  @@index([organizationId, name])
+}
+
+model StockReceipt {
+  id                String             @id @default(cuid())
+  organizationId    String
+  supplierId        String?
+  externalReference String?
+  status            String             @default("DRAFT")
+  receivedAt        DateTime           @default(now())
+  actorId           String?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  organization      Organization       @relation(fields: [organizationId], references: [id])
+  supplier          Supplier?          @relation(fields: [supplierId], references: [id])
+  lines             StockReceiptLine[]
+
+  @@index([organizationId, status])
+  @@index([organizationId, receivedAt])
+}
+
+model StockReceiptLine {
+  id           String       @id @default(cuid())
+  receiptId    String
+  productId    String
+  batchNumber  String?
+  expiryDate   DateTime?
+  unitCost     Decimal?     @db.Decimal(14, 2)
+  sellingPrice Decimal?     @db.Decimal(14, 2)
+  quantity     Decimal      @db.Decimal(14, 3)
+  receipt      StockReceipt @relation(fields: [receiptId], references: [id])
+  product      Product      @relation(fields: [productId], references: [id])
+
+  @@index([receiptId])
+  @@index([productId])
+}
+
+model StockCount {
+  id              String   @id @default(cuid())
+  organizationId  String
+  status          String   @default("DRAFT")
+  scope           String   @default("ALL")
+  startedAt       DateTime @default(now())
+  closedAt        DateTime?
+  counterId       String?
+  approverId      String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  lines           StockCountLine[]
+
+  @@index([organizationId, status])
+}
+
+model StockCountLine {
+  id               String  @id @default(cuid())
+  countId          String
+  batchId          String?
+  productId        String?
+  recordedQuantity Decimal? @db.Decimal(14, 3)
+  countedQuantity Decimal  @db.Decimal(14, 3)
+  variance         Decimal? @db.Decimal(14, 3)
+  note             String?
+  versionAtCount  DateTime @default(now())
+  count           StockCount @relation(fields: [countId], references: [id])
+
+  @@index([countId])
 }

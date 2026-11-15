@@ -1,9 +1,4 @@
-import {
-  CanActivate,
-  ExecutionContext,
-  Injectable,
-  UnauthorizedException,
-} from '@nestjs/common';
+import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
 import * as jwt from 'jsonwebtoken';
 
 @Injectable()
@@ -17,7 +12,9 @@ export class JwtAuthGuard implements CanActivate {
     }
     try {
       const secret = process.env.JWT_SECRET ?? 'change-me-in-production';
-      request.user = jwt.verify(token, secret);
+      const payload = jwt.verify(token, secret) as Record<string, unknown>;
+      request.user = payload;
+      request.organisationId = payload.organisationId as string;
     } catch {
       throw new UnauthorizedException('Invalid or expired token');
     }
