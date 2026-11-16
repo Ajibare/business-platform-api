@@ -22,4 +22,12 @@ export class ReportsController {
   async getLowStock(@CurrentUser('organisationId') organizationId: string) {
     return this.reportsService.getLowStock(organizationId);
   }
+
+  @Get('daily')
+  async getDailyPerformance(
+    @CurrentUser('organisationId') organizationId: string,
+    @Query('date') date?: string,
+  ) {
+    return this.reportsService.getDailyPerformance(organizationId, date);
+  }
 }

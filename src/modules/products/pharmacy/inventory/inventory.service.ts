@@ -1,7 +1,24 @@
 import { Injectable, NotFoundException, BadRequestException, HttpException } from '@nestjs/common';
 import { PrismaService } from '../../../../database/prisma.service';
+import { dateKeyFromCalendarDate, localDateKey } from '../../../../common/utils/time';
 import { CreateMovementDto } from './dto/create-movement.dto';
 import { ListMovementsDto } from './dto/list-movements.dto';
+import { ListStockDto } from './dto/list-stock.dto';
+
+export interface StockOnHandRecord {
+  productId: string;
+  name: string;
+  unit: string;
+  /** Quantity the sale engine can sell: unexpired batches only. */
+  sellableQuantity: number;
+  /** Quantity sitting in batches that have already expired. */
+  expiredQuantity: number;
+  totalQuantity: number;
+  batchCount: number;
+  nearestExpiryDate: string | null;
+  /** Selling price of the batch that will be picked first by FEFO. */
+  sellingPrice: number | null;
+}
 
 export interface MovementRecord {
   id: string;
@@ -131,6 +148,100 @@ export class InventoryService {
       balanceQuantity: balanceRecord ? this.toQuantity(balanceRecord.quantity) : newQuantity,
       version: balanceRecord ? balanceRecord.version : 1,
     };
+  }
+
+  /**
+   * Sellable stock per medicine, used by the sales screen. Quantities come from
+   * batch balances so the number shown is the number FEFO would actually pick.
+   */
+  async stockOnHand(
+    organizationId: string,
+    query: ListStockDto = {},
+  ): Promise<{ data: StockOnHandRecord[] }> {
+    const organization = await this.prisma.organization.findUnique({
+      where: { id: organizationId },
+      select: { timezone: true },
+    });
+    const timeZone = organization?.timezone ?? 'Africa/Lagos';
+    const todayKey = localDateKey(new Date(), timeZone);
+    const search = query.search?.trim();
+
+    const products = await this.prisma.product.findMany({
+      where: {
+        organizationId,
+        active: true,
+        ...(search
+          ? {
+              OR: [
+                { name: { contains: search, mode: 'insensitive' as const } },
+                { genericName: { contains: search, mode: 'insensitive' as const } },
+                { brand: { contains: search, mode: 'insensitive' as const } },
+              ],
+            }
+          : {}),
+      },
+      select: { id: true, name: true, unit: true },
+      orderBy: { name: 'asc' },
+      take: query.limit ?? 100,
+    });
+    if (products.length === 0) return { data: [] };
+
+    const balances = await this.prisma.batchBalance.findMany({
+      where: {
+        organizationId,
+        quantity: { gt: 0 },
+        batch: { productId: { in: products.map((product) => product.id) } },
+      },
+      select: {
+        quantity: true,
+        batch: { select: { productId: true, expiryDate: true, sellingPrice: true } },
+      },
+    });
+
+    const byProduct = new Map<string, StockOnHandRecord>();
+    for (const product of products) {
+      byProduct.set(product.id, {
+        productId: product.id,
+        name: product.name,
+        unit: product.unit,
+        sellableQuantity: 0,
+        expiredQuantity: 0,
+        totalQuantity: 0,
+        batchCount: 0,
+        nearestExpiryDate: null,
+        sellingPrice: null,
+      });
+    }
+
+    for (const balance of balances) {
+      const entry = byProduct.get(balance.batch.productId);
+      if (!entry) continue;
+      const quantity = this.toQuantity(balance.quantity);
+      const expiryKey = balance.batch.expiryDate
+        ? dateKeyFromCalendarDate(balance.batch.expiryDate)
+        : null;
+      const expired = expiryKey !== null && expiryKey < todayKey;
+
+      entry.totalQuantity += quantity;
+      entry.batchCount += 1;
+      if (expired) {
+        entry.expiredQuantity += quantity;
+        continue;
+      }
+
+      entry.sellableQuantity += quantity;
+      // FEFO picks the earliest expiry first, so that batch sets the price and date shown.
+      if (expiryKey !== null && (entry.nearestExpiryDate === null || expiryKey < entry.nearestExpiryDate)) {
+        entry.nearestExpiryDate = expiryKey;
+        entry.sellingPrice =
+          balance.batch.sellingPrice !== null ? this.toQuantity(balance.batch.sellingPrice) : null;
+      } else if (expiryKey === null && entry.nearestExpiryDate === null && entry.sellingPrice === null) {
+        entry.sellingPrice =
+          balance.batch.sellingPrice !== null ? this.toQuantity(balance.batch.sellingPrice) : null;
+      }
+    }
+
+    return { data: [...byProduct.values()] };
   }
 
   async findAll(organizationId: string, query: ListMovementsDto) {

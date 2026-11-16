@@ -37,6 +37,11 @@ export class CreateMedicineDto {
   unit: string;
 
   @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  barcode?: string;
+
+  @IsOptional()
   @IsNumber()
   reorderThreshold?: number;
 

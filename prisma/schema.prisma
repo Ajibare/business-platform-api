@@ -14,6 +14,17 @@ enum Role {
   READ_ONLY
 }
 
+enum UserStatus {
+  ACTIVE
+  DEACTIVATED
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  REVOKED
+}
+
 enum MovementType {
   OPENING
   RECEIPT
@@ -26,12 +37,24 @@ enum MovementType {
   REVERSAL
 }
 
+enum SaleStatus {
+  COMPLETED
+  VOIDED
+}
+
 model Organization {
   id              String          @id @default(cuid())
   name            String
   slug            String          @unique
   timezone        String          @default("Africa/Lagos")
   currency        String          @default("NGN")
+  phone           String?
+  address         String?
+  outletProfile   String?
+  nearExpiryWarningDays Int       @default(90)
+  defaultUnit     String?
+  defaultMinStockLevel Decimal?   @db.Decimal(14, 3)
+  onboardingCompletedAt DateTime?
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt
   memberships     Membership[]
@@ -41,16 +64,36 @@ model Organization {
   batchBalances   BatchBalance[]
   suppliers       Supplier[]
   receipts        StockReceipt[]
+  notifications   Notification[]
+  notificationPrefs NotificationPreference?
+  recipients      NotificationRecipient[]
+  deliveries      NotificationDelivery[]
+  auditLogs       AuditLog[]
+  importJobs      ImportJob[]
+  invitations     StaffInvitation[]
+  onboarding      OnboardingProgress?
+  sales           Sale[]
+  saleReturns     SaleReturn[]
 }
 
 model User {
   id           String        @id @default(cuid())
+  name         String?
   email        String?       @unique
   phone        String?       @unique
   passwordHash String?
+  status       UserStatus    @default(ACTIVE)
+  emailVerifiedAt DateTime?
+  phoneVerifiedAt DateTime?
+  failedLoginAttempts Int      @default(0)
+  lockedUntil  DateTime?
+  lastLoginAt  DateTime?
+  passwordChangedAt DateTime?
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
   memberships  Membership[]
+  sessions     AuthSession[]
+  passwordResets PasswordReset[]
 }
 
 model Membership {
@@ -72,20 +115,32 @@ model Product {
   organizationId   String
   name             String
   normalizedName   String
+  genericName      String?
+  category         String?
   brand            String?
   strength         String?
   dosageForm       String?
   packSize         String?
   unit             String
+  barcode          String?
+  /// Pharmacy internal stock keeping unit. Optional and unique per pharmacy.
+  sku              String?
+  description      String?
   reorderThreshold Decimal?          @db.Decimal(14, 3)
   active           Boolean           @default(true)
+  /// Seeded by the onboarding "explore with sample data" option so the UI can label it.
+  isSample         Boolean           @default(false)
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
   organization     Organization      @relation(fields: [organizationId], references: [id])
   batches          Batch[]
   receiptLines     StockReceiptLine[]
+  saleLines        SaleLine[]
 
+  @@unique([organizationId, barcode])
+  @@unique([organizationId, sku])
   @@index([organizationId, normalizedName])
+  @@index([organizationId, barcode])
 }
 
 model Batch {
@@ -103,6 +158,7 @@ model Batch {
   product         Product        @relation(fields: [productId], references: [id])
   balance         BatchBalance?
   movements       StockMovement[]
+  saleLines       SaleLine[]
 
   @@index([organizationId, expiryDate])
   @@index([organizationId, productId])
@@ -114,6 +170,9 @@ model StockMovement {
   batchId         String
   type            MovementType
   quantityDelta   Decimal      @db.Decimal(14, 3)
+  /// Balance before and after the movement, captured atomically with the change.
+  previousQuantity Decimal?    @db.Decimal(14, 3)
+  newQuantity     Decimal?     @db.Decimal(14, 3)
   reason          String?
   actorId         String?
   idempotencyKey  String
@@ -217,4 +276,313 @@ model StockCountLine {
   count           StockCount @relation(fields: [countId], references: [id])
 
   @@index([countId])
+}
+
+model NotificationPreference {
+  organizationId          String   @id
+  inAppEnabled            Boolean  @default(true)
+  emailEnabled            Boolean  @default(false)
+  expiryRemindersEnabled  Boolean  @default(true)
+  saleNotificationsEnabled Boolean @default(false)
+  reminderLeadDays        Int      @default(90)
+  /// Deprecated: milestone reminders (90/60/30/7/0 days) ignore the interval.
+  reminderIntervalDays    Int      @default(7)
+  dailyReportEnabled      Boolean  @default(false)
+  /// Local delivery time in HH:mm, evaluated in `dailyReportTimezone`.
+  dailyReportTime         String   @default("20:00")
+  /// Reporting timezone; falls back to the organisation timezone when null.
+  dailyReportTimezone     String?
+  updatedAt               DateTime @updatedAt
+  createdAt               DateTime @default(now())
+  organization            Organization @relation(fields: [organizationId], references: [id])
+}
+
+model NotificationRecipient {
+  id             String   @id @default(cuid())
+  organizationId String
+  email          String
+  name           String?
+  active         Boolean  @default(true)
+  receivesExpiry Boolean  @default(true)
+  receivesSales  Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  @@unique([organizationId, email])
+  @@index([organizationId, active])
+}
+
+model Notification {
+  id             String   @id @default(cuid())
+  organizationId String
+  type           String
+  title          String
+  body           String
+  severity       String   @default("info")
+  productId      String?
+  batchId        String?
+  dedupeKey      String
+  metadata       Json?
+  createdAt      DateTime @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  reads          NotificationRead[]
+  deliveries     NotificationDelivery[]
+
+  @@unique([organizationId, dedupeKey])
+  @@index([organizationId, createdAt])
+}
+
+model NotificationRead {
+  notificationId String
+  userId         String
+  readAt         DateTime @default(now())
+  notification   Notification @relation(fields: [notificationId], references: [id])
+
+  @@id([notificationId, userId])
+  @@index([userId])
+}
+
+model NotificationDelivery {
+  id             String   @id @default(cuid())
+  organizationId String
+  notificationId String
+  recipient      String
+  status         String   @default("PENDING")
+  attempts       Int      @default(0)
+  lastError      String?
+  lastAttemptAt  DateTime?
+  nextAttemptAt  DateTime?
+  sentAt         DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  notification   Notification @relation(fields: [notificationId], references: [id])
+
+  @@unique([notificationId, recipient])
+  @@index([organizationId, status])
+  @@index([status, nextAttemptAt])
+}
+
+model Sale {
+  id              String     @id @default(cuid())
+  organizationId  String
+  reference       String
+  status          SaleStatus @default(COMPLETED)
+  occurredAt      DateTime   @default(now())
+  actorId         String?
+  customerName    String?
+  note            String?
+  idempotencyKey  String
+  /// Sum of line quantity x unit price before discounts.
+  subtotal        Decimal    @db.Decimal(14, 2)
+  discountTotal   Decimal    @default(0) @db.Decimal(14, 2)
+  /// Sum of refunds recorded against the sale.
+  refundTotal     Decimal    @default(0) @db.Decimal(14, 2)
+  /// Subtotal minus discounts. Sales revenue, never profit.
+  revenue         Decimal    @db.Decimal(14, 2)
+  /// Sum of known batch costs. Null when a line has no recorded cost.
+  costTotal       Decimal?   @db.Decimal(14, 2)
+  /// Revenue minus refunds minus cost. Null when cost is incomplete.
+  grossProfit     Decimal?   @db.Decimal(14, 2)
+  unitCount       Decimal    @default(0) @db.Decimal(14, 3)
+  voidedAt        DateTime?
+  voidedById      String?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+  organization    Organization @relation(fields: [organizationId], references: [id])
+  lines           SaleLine[]
+  returns         SaleReturn[]
+
+  @@unique([organizationId, idempotencyKey])
+  @@index([organizationId, occurredAt])
+  @@index([organizationId, status, occurredAt])
+}
+
+model SaleLine {
+  id               String   @id @default(cuid())
+  saleId           String
+  productId        String
+  batchId          String
+  quantity         Decimal  @db.Decimal(14, 3)
+  returnedQuantity Decimal  @default(0) @db.Decimal(14, 3)
+  unitPrice        Decimal  @db.Decimal(14, 2)
+  discount         Decimal  @default(0) @db.Decimal(14, 2)
+  lineTotal        Decimal  @db.Decimal(14, 2)
+  unitCost         Decimal? @db.Decimal(14, 2)
+  costTotal        Decimal? @db.Decimal(14, 2)
+  sale             Sale     @relation(fields: [saleId], references: [id])
+  product          Product  @relation(fields: [productId], references: [id])
+  batch            Batch    @relation(fields: [batchId], references: [id])
+  returnLines      SaleReturnLine[]
+
+  @@index([saleId])
+  @@index([productId])
+  @@index([batchId])
+}
+
+model SaleReturn {
+  id             String   @id @default(cuid())
+  organizationId String
+  saleId         String
+  amount         Decimal  @db.Decimal(14, 2)
+  quantity       Decimal  @db.Decimal(14, 3)
+  reason         String?
+  actorId        String?
+  idempotencyKey String
+  occurredAt     DateTime @default(now())
+  createdAt      DateTime @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  sale           Sale     @relation(fields: [saleId], references: [id])
+  lines          SaleReturnLine[]
+
+  @@unique([organizationId, idempotencyKey])
+  @@index([organizationId, occurredAt])
+  @@index([saleId])
+}
+
+model SaleReturnLine {
+  id         String   @id @default(cuid())
+  returnId   String
+  saleLineId String
+  quantity   Decimal  @db.Decimal(14, 3)
+  amount     Decimal  @db.Decimal(14, 2)
+  return     SaleReturn @relation(fields: [returnId], references: [id])
+  saleLine   SaleLine @relation(fields: [saleLineId], references: [id])
+
+  @@index([returnId])
+  @@index([saleLineId])
+}
+
+model AuditLog {
+  id             String   @id @default(cuid())
+  organizationId String
+  actorId        String?
+  action         String
+  entityType     String
+  entityId       String?
+  metadata       Json?
+  createdAt      DateTime @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId, createdAt])
+}
+
+model ImportJob {
+  id             String   @id @default(cuid())
+  organizationId String
+  type           String
+  filename       String
+  status         String   @default("VALIDATED")
+  totalRows      Int      @default(0)
+  validRows      Int      @default(0)
+  invalidRows    Int      @default(0)
+  duplicateRows  Int      @default(0)
+  importedRows   Int      @default(0)
+  failedRows     Int      @default(0)
+  createdById    String?
+  summary        Json?
+  createdAt      DateTime @default(now())
+  completedAt    DateTime?
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  rows           ImportJobRow[]
+
+  @@index([organizationId, createdAt])
+}
+
+model ImportJobRow {
+  id        String   @id @default(cuid())
+  jobId     String
+  rowNumber Int
+  status    String
+  data      Json
+  errors    Json
+  productId String?
+  batchId   String?
+  job       ImportJob @relation(fields: [jobId], references: [id])
+
+  @@index([jobId, rowNumber])
+}
+
+model AuthSession {
+  id                  String    @id @default(cuid())
+  userId              String
+  organisationId      String?
+  refreshTokenHash    String    @unique
+  expiresAt           DateTime
+  revokedAt           DateTime?
+  replacedBySessionId String?
+  userAgent           String?
+  ipAddress           String?
+  createdAt           DateTime  @default(now())
+  lastUsedAt          DateTime  @default(now())
+  user                User      @relation(fields: [userId], references: [id])
+
+  @@index([userId, revokedAt])
+  @@index([expiresAt])
+}
+
+model PendingRegistration {
+  id                   String   @id @default(cuid())
+  name                 String
+  email                String   @unique
+  phone                String?
+  passwordHash         String
+  termsAcceptedAt      DateTime
+  verificationCodeHash String
+  codeExpiresAt        DateTime
+  attempts             Int      @default(0)
+  resendCount          Int      @default(0)
+  lastSentAt           DateTime @default(now())
+  verifiedAt           DateTime?
+  userId               String?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  @@index([phone])
+  @@index([codeExpiresAt])
+}
+
+model PasswordReset {
+  id          String    @id @default(cuid())
+  userId      String
+  tokenHash   String    @unique
+  expiresAt   DateTime
+  consumedAt  DateTime?
+  requestedIp String?
+  createdAt   DateTime  @default(now())
+  user        User      @relation(fields: [userId], references: [id])
+
+  @@index([userId, consumedAt])
+}
+
+model StaffInvitation {
+  id             String           @id @default(cuid())
+  organizationId String
+  email          String?
+  phone          String?
+  role           Role
+  status         InvitationStatus @default(PENDING)
+  tokenHash      String           @unique
+  expiresAt      DateTime
+  invitedById    String
+  acceptedById   String?
+  acceptedAt     DateTime?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  organization   Organization     @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId, status])
+  @@index([email])
+}
+
+model OnboardingProgress {
+  organizationId String       @id
+  currentStep    Int          @default(1)
+  completedSteps Json         @default("[]")
+  status         String       @default("IN_PROGRESS")
+  completedAt    DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id])
 }

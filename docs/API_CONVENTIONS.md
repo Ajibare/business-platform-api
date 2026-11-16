@@ -26,10 +26,23 @@ Error body: `{ statusCode, error, code, message }`.
 - Batches: `GET /api/v1/pharmacy/batches`, `POST /api/v1/pharmacy/batches`, `GET /api/v1/pharmacy/batches/:id`
 - Movements: `POST /api/v1/pharmacy/movements`, `GET /api/v1/pharmacy/movements`
 - Expiry: `GET /api/v1/pharmacy/expiry/near`, `GET /api/v1/pharmacy/expiry/expired`, `GET /api/v1/pharmacy/expiry/unknown`
-- Reports: `GET /api/v1/pharmacy/reports/dashboard`, `GET /api/v1/pharmacy/reports/low-stock`
+- Reports: `GET /api/v1/pharmacy/reports/dashboard`, `GET /api/v1/pharmacy/reports/low-stock`, `GET /api/v1/pharmacy/reports/daily`
+- Barcodes: `GET /api/v1/pharmacy/barcodes/lookup`, `PUT /api/v1/pharmacy/barcodes/product/:productId`
+- Bulk import: `GET /api/v1/pharmacy/imports/templates/:type`, `GET /api/v1/pharmacy/imports/schema/:type`, `GET /api/v1/pharmacy/imports`, `POST /api/v1/pharmacy/imports`, `GET /api/v1/pharmacy/imports/:id`, `GET /api/v1/pharmacy/imports/:id/errors`, `POST /api/v1/pharmacy/imports/:id/confirm`
 - Counts: `POST /api/v1/pharmacy/counts`, `POST /api/v1/pharmacy/counts/:id/lines`, `POST /api/v1/pharmacy/counts/:id/submit`, `POST /api/v1/pharmacy/counts/:id/approve`
 - Receipts: `POST /api/v1/pharmacy/receipts`, `POST /api/v1/pharmacy/receipts/:id/confirm`
 - Suppliers: `GET /api/v1/pharmacy/suppliers`, `POST /api/v1/pharmacy/suppliers`, `GET /api/v1/pharmacy/suppliers/:id`, `PATCH /api/v1/pharmacy/suppliers/:id`
+
+## Notification endpoints
+
+- Feed: `GET /api/v1/notifications`, `GET /api/v1/notifications/unread-count`, `POST /api/v1/notifications/:id/read`, `POST /api/v1/notifications/read-all`
+- Capabilities and preferences: `GET /api/v1/notifications/capabilities`, `GET /api/v1/notifications/preferences`, `PATCH /api/v1/notifications/preferences`
+- Recipients: `GET /api/v1/notifications/recipients`, `POST /api/v1/notifications/recipients`, `PATCH /api/v1/notifications/recipients/:id`, `DELETE /api/v1/notifications/recipients/:id`
+- Deliveries: `GET /api/v1/notifications/deliveries`, `POST /api/v1/notifications/deliveries/:id/retry`
+- Manual scan: `POST /api/v1/notifications/expiry-scan`
+- Audit log: `GET /api/v1/audit`
+
+The expiry scan is also scheduled inside the API process; see `NOTIFICATION_SYSTEM.md`.
 
 ## Errors
 

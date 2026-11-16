@@ -9,6 +9,19 @@ import { RolesGuard } from '../../../../common/guards/roles.guard';
 export class ExpiryController {
   constructor(private readonly expiryService: ExpiryService) {}
 
+  @Get('alerts')
+  async getAlerts(
+    @CurrentUser('organisationId') organizationId: string,
+    @Query('days') days?: string,
+    @Query('q') search?: string,
+  ) {
+    const parsed = days ? Number(days) : undefined;
+    return this.expiryService.getAlerts(organizationId, {
+      windowDays: parsed && Number.isFinite(parsed) ? parsed : undefined,
+      search,
+    });
+  }
+
   @Get('near')
   async findNear(@CurrentUser('organisationId') organizationId: string, @Query('days') days?: string) {
     const parsed = days ? Number(days) : 30;

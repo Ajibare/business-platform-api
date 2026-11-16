@@ -36,6 +36,12 @@ export class UpdateMedicineDto {
   @MaxLength(32)
   unit?: string;
 
+  /** Pass `null` to clear the barcode. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  barcode?: string | null;
+
   @IsOptional()
   @IsNumber()
   reorderThreshold?: number;

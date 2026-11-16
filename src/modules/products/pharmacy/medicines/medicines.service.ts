@@ -1,8 +1,11 @@
-import { Injectable, NotFoundException, ConflictException } from '@nestjs/common';
+import { Injectable, NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../../../database/prisma.service';
 import { CreateMedicineDto } from './dto/create-medicine.dto';
 import { UpdateMedicineDto } from './dto/update-medicine.dto';
 import { ListMedicinesDto } from './dto/list-medicines.dto';
+import { BarcodesService } from '../barcodes/barcodes.service';
+import { isValidBarcode, normalizeBarcode } from '../barcodes/barcode.util';
+import { normalizeProductName } from '../../../../common/utils/product-name';
 
 export interface MedicineRecord {
   id: string;
@@ -14,6 +17,7 @@ export interface MedicineRecord {
   dosageForm: string | null;
   packSize: string | null;
   unit: string;
+  barcode: string | null;
   reorderThreshold: number | null;
   active: boolean;
   createdAt: Date;
@@ -31,6 +35,7 @@ interface MedicineRow {
   dosageForm: string | null;
   packSize: string | null;
   unit: string;
+  barcode: string | null;
   reorderThreshold: { toNumber(): number } | null;
   active: boolean;
   createdAt: Date;
@@ -39,7 +44,10 @@ interface MedicineRow {
 
 @Injectable()
 export class MedicinesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly barcodesService: BarcodesService,
+  ) {}
 
   async create(organizationId: string, actorId: string, dto: CreateMedicineDto): Promise<MedicineRecord> {
     const normalizedName = dto.normalizedName ?? MedicinesService.normalize(dto.name);
@@ -54,6 +62,11 @@ export class MedicinesService {
       });
     }
 
+    const barcode = dto.barcode ? this.normalizeBarcodeOrThrow(dto.barcode) : null;
+    if (barcode) {
+      await this.barcodesService.assertAvailable(organizationId, barcode);
+    }
+
     const product = await this.prisma.product.create({
       data: {
         organizationId,
@@ -64,6 +77,7 @@ export class MedicinesService {
         dosageForm: dto.dosageForm ?? null,
         packSize: dto.packSize ?? null,
         unit: dto.unit,
+        barcode,
         reorderThreshold: dto.reorderThreshold ?? null,
         active: dto.active ?? true,
       },
@@ -96,6 +110,7 @@ export class MedicinesService {
                 { brand: { contains: search, mode: 'insensitive' } },
                 { strength: { contains: search, mode: 'insensitive' } },
                 { dosageForm: { contains: search, mode: 'insensitive' } },
+                { barcode: { contains: search.toUpperCase(), mode: 'insensitive' } },
                 { normalizedName: { contains: search.toLowerCase(), mode: 'insensitive' } },
               ],
             }
@@ -134,6 +149,7 @@ export class MedicinesService {
       dosageForm: medicine.dosageForm,
       packSize: medicine.packSize,
       unit: medicine.unit,
+      barcode: medicine.barcode,
       reorderThreshold:
         medicine.reorderThreshold !== null ? medicine.reorderThreshold.toNumber() : null,
       active: medicine.active,
@@ -187,6 +203,7 @@ export class MedicinesService {
         ...(dto.dosageForm !== undefined ? { dosageForm: dto.dosageForm } : {}),
         ...(dto.packSize !== undefined ? { packSize: dto.packSize } : {}),
         ...(dto.unit !== undefined ? { unit: dto.unit } : {}),
+        ...(dto.barcode !== undefined ? { barcode: await this.resolveBarcode(organizationId, existing.id, dto.barcode) } : {}),
         ...(dto.reorderThreshold !== undefined ? { reorderThreshold: dto.reorderThreshold } : {}),
         ...(dto.active !== undefined ? { active: dto.active } : {}),
       },
@@ -211,6 +228,7 @@ export class MedicinesService {
       dosageForm: medicine.dosageForm,
       packSize: medicine.packSize,
       unit: medicine.unit,
+      barcode: medicine.barcode,
       reorderThreshold: medicine.reorderThreshold !== null ? medicine.reorderThreshold.toNumber() : null,
       active: medicine.active,
       createdAt: medicine.createdAt,
@@ -219,8 +237,31 @@ export class MedicinesService {
     };
   }
 
+  private normalizeBarcodeOrThrow(value: string): string {
+    const barcode = normalizeBarcode(value);
+    if (!isValidBarcode(barcode)) {
+      throw new BadRequestException({
+        code: 'VALIDATION_ERROR',
+        message:
+          'Barcodes must be 4 to 64 characters and may only contain letters, numbers, dot, dash or underscore.',
+      });
+    }
+    return barcode;
+  }
+
+  private async resolveBarcode(
+    organizationId: string,
+    productId: string,
+    value: string | null,
+  ): Promise<string | null> {
+    if (value === null || value.trim() === '') return null;
+    const barcode = this.normalizeBarcodeOrThrow(value);
+    await this.barcodesService.assertAvailable(organizationId, barcode, productId);
+    return barcode;
+  }
+
   private static normalize(name: string): string {
-    return name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    return normalizeProductName(name);
   }
 
   private toQuantity(value: unknown): number {

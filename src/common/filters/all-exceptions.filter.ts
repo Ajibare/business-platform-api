@@ -26,11 +26,16 @@ export class AllExceptionsFilter implements ExceptionFilter {
     const status = exception instanceof HttpException ? exception.getStatus() : HttpStatus.INTERNAL_SERVER_ERROR;
     const exceptionResponse = exception instanceof HttpException ? exception.getResponse() : undefined;
     const isObject = typeof exceptionResponse === 'object' && exceptionResponse !== null;
-    const message = isObject && 'message' in exceptionResponse
-      ? String((exceptionResponse as { message?: unknown }).message ?? 'Internal server error')
-      : exception instanceof HttpException
-        ? exception.message
-        : 'Internal server error';
+    const rawMessage = isObject ? (exceptionResponse as { message?: unknown }).message : undefined;
+    // class-validator reports one message per failed rule; the first one is what
+    // the form shows next to the field.
+    const message = Array.isArray(rawMessage)
+      ? String(rawMessage[0] ?? 'Internal server error')
+      : rawMessage !== undefined
+        ? String(rawMessage)
+        : exception instanceof HttpException
+          ? exception.message
+          : 'Internal server error';
     const error = isObject && 'code' in exceptionResponse
       ? String((exceptionResponse as { code?: unknown }).code)
       : exception instanceof HttpException
@@ -42,11 +47,23 @@ export class AllExceptionsFilter implements ExceptionFilter {
         : STATUS_TO_ERROR_CODE[status]
     ) as ApiErrorCode;
 
-    response.status(status).json({
+    const payload: Record<string, unknown> = {
       statusCode: status,
       error,
       code,
       message,
-    });
+    };
+
+    // Extra, non-secret hints the client uses to render a useful form: which
+    // field failed, how many attempts are left and how long to wait before
+    // retrying. They are only forwarded when the exception set them.
+    if (isObject) {
+      for (const key of ['field', 'details', 'retryAfterSeconds'] as const) {
+        const value = (exceptionResponse as Record<string, unknown>)[key];
+        if (value !== undefined) payload[key] = value;
+      }
+    }
+
+    response.status(status).json(payload);
   }
 }
