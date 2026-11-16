@@ -259,7 +259,21 @@ export class AuthService {
         data: { ...payload, resendCount: pending.resendCount + 1 },
       });
     } else {
-      await this.prisma.pendingRegistration.create({ data: { ...payload, resendCount: 0 } });
+      try {
+        await this.prisma.pendingRegistration.create({ data: { ...payload, resendCount: 0 } });
+      } catch (error) {
+        // Two submissions can pass the check above at the same time; the unique
+        // index on `email` decides, and the loser gets a normal conflict instead
+        // of an opaque 500.
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+          throw new ConflictException({
+            code: 'EMAIL_IN_USE',
+            message: 'An account already exists for this email address. Try signing in instead.',
+            field: 'email',
+          });
+        }
+        throw error;
+      }
     }
 
     await this.deliverVerificationCode(email, payload.name, code);

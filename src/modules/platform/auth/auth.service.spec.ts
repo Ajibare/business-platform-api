@@ -5,6 +5,7 @@ import {
   HttpException,
   UnauthorizedException,
 } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 import { AuthService } from './auth.service';
 import { hashSecret } from './auth.utils';
@@ -143,35 +144,92 @@ describe('AuthService', () => {
   });
 
   describe('register', () => {
+    const validRequest = {
+      name: 'Ada Obi',
+      email: 'ada@pharmacy.ng',
+      password: PASSWORD,
+      termsAccepted: true,
+    };
+
     it('rejects a weak password before touching the database', async () => {
-      await expect(
-        service.register(
-          {
-            name: 'Ada Obi',
-            email: 'ada@pharmacy.ng',
-            password: 'short',
-            termsAccepted: true,
-          },
-          request,
-        ),
-      ).rejects.toBeInstanceOf(BadRequestException);
+      const error = await service
+        .register({ ...validRequest, password: 'short' }, request)
+        .catch((thrown) => thrown);
+
+      expect(error).toBeInstanceOf(BadRequestException);
+      expect(error.getResponse()).toMatchObject({ code: 'WEAK_PASSWORD', field: 'password' });
+      // The form lists every unmet rule, so the whole list has to survive.
+      expect(error.getResponse().details.issues).toEqual(
+        expect.arrayContaining(['Use at least 10 characters.']),
+      );
+      expect(prisma.user.findFirst).not.toHaveBeenCalled();
       expect(prisma.pendingRegistration.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects a password confirmation that does not match', async () => {
+      const error = await service
+        .register({ ...validRequest, confirmPassword: 'Something-Else-19' }, request)
+        .catch((thrown) => thrown);
+
+      expect(error).toBeInstanceOf(BadRequestException);
+      expect(error.getResponse()).toMatchObject({
+        code: 'PASSWORD_MISMATCH',
+        field: 'confirmPassword',
+      });
+      expect(prisma.user.findFirst).not.toHaveBeenCalled();
+    });
+
+    it('rejects a phone number that is not a Nigerian mobile number', async () => {
+      const error = await service
+        .register({ ...validRequest, phone: '123456789' }, request)
+        .catch((thrown) => thrown);
+
+      expect(error).toBeInstanceOf(BadRequestException);
+      expect(error.getResponse()).toMatchObject({ code: 'INVALID_PHONE', field: 'phone' });
+      expect(prisma.user.findFirst).not.toHaveBeenCalled();
     });
 
     it('reports an existing account instead of creating a second one', async () => {
       prisma.user.findFirst.mockResolvedValue({ email: 'ada@pharmacy.ng', phone: null });
 
-      await expect(
-        service.register(
-          {
-            name: 'Ada Obi',
-            email: 'ada@pharmacy.ng',
-            password: PASSWORD,
-            termsAccepted: true,
-          },
-          request,
+      const error = await service.register(validRequest, request).catch((thrown) => thrown);
+
+      expect(error).toBeInstanceOf(ConflictException);
+      expect(error.getResponse()).toMatchObject({ code: 'EMAIL_IN_USE', field: 'email' });
+      expect(prisma.pendingRegistration.create).not.toHaveBeenCalled();
+    });
+
+    it('answers 409 when two submissions race on the unique email index', async () => {
+      prisma.user.findFirst.mockResolvedValue(null);
+      prisma.pendingRegistration.findUnique.mockResolvedValue(null);
+      prisma.pendingRegistration.create.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('Unique constraint failed on the fields: (`email`)', {
+          code: 'P2002',
+          clientVersion: '6.16.0',
+          meta: { target: ['email'] },
+        }),
+      );
+
+      const error = await service.register(validRequest, request).catch((thrown) => thrown);
+
+      expect(error).toBeInstanceOf(ConflictException);
+      expect(error.getResponse()).toMatchObject({ code: 'EMAIL_IN_USE', field: 'email' });
+    });
+
+    it('lets a database connection failure reach the exception filter', async () => {
+      prisma.user.findFirst.mockRejectedValue(
+        new Prisma.PrismaClientInitializationError(
+          'Authentication failed against database server at `localhost`.',
+          'P1000',
+          '6.16.0',
         ),
-      ).rejects.toBeInstanceOf(ConflictException);
+      );
+
+      const error = await service.register(validRequest, request).catch((thrown) => thrown);
+
+      // Not translated into a 4xx here: the global filter turns it into
+      // 503 DATABASE_UNAVAILABLE and logs the connection hint.
+      expect(error).toBeInstanceOf(Prisma.PrismaClientInitializationError);
       expect(prisma.pendingRegistration.create).not.toHaveBeenCalled();
     });
 
@@ -268,6 +326,26 @@ describe('AuthService', () => {
       expect(audit.record).toHaveBeenCalledWith(
         expect.objectContaining({ action: 'ORGANISATION_REGISTERED' }),
       );
+    });
+
+    it('leaves no account behind when the workspace transaction fails', async () => {
+      prisma.pendingRegistration.findUnique.mockResolvedValue({ ...pending });
+      prisma.tx.organization.create.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('Foreign key constraint failed', {
+          code: 'P2003',
+          clientVersion: '6.16.0',
+        }),
+      );
+
+      const error = await service
+        .verifyRegistration({ email: 'ada@pharmacy.ng', code: '123456' }, request)
+        .catch((thrown) => thrown);
+
+      expect(error).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+      // The transaction rolled back, so no session and no audit row exist for a
+      // sign-up that never completed.
+      expect(sessions.create).not.toHaveBeenCalled();
+      expect(audit.record).not.toHaveBeenCalled();
     });
 
     it('does not create a second workspace when the same code is submitted again', async () => {
