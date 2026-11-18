@@ -1,60 +1,84 @@
 import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
-import { Role } from '@prisma/client';
 import { SalesService } from './sales.service';
 import { CreateSaleDto } from './dto/create-sale.dto';
 import { CreateSaleReturnDto } from './dto/create-sale-return.dto';
 import { ListSalesDto } from './dto/list-sales.dto';
-import { CurrentUser } from '../../../../common/decorators/current-user.decorator';
+import { CurrentActor } from '../../../../common/decorators/current-actor.decorator';
+import { CurrentBranch } from '../../../../common/decorators/current-branch.decorator';
+import { RequirePermission } from '../../../../common/decorators/require-permission.decorator';
 import { JwtAuthGuard } from '../../../../common/guards/jwt-auth.guard';
-import { RolesGuard } from '../../../../common/guards/roles.guard';
-import { Roles } from '../../../../common/decorators/roles.decorator';
+import { PermissionsGuard } from '../../../../common/guards/permissions.guard';
+import { BranchScopeGuard } from '../../../../common/guards/branch-scope.guard';
+import {
+  BranchAccessService,
+  type BranchScope,
+  type RequestActor,
+} from '../../../platform/branches/branch-access.service';
 
 @Controller('pharmacy/sales')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard, BranchScopeGuard)
 export class SalesController {
-  constructor(private readonly salesService: SalesService) {}
+  constructor(
+    private readonly salesService: SalesService,
+    private readonly branchAccess: BranchAccessService,
+  ) {}
 
   @Get()
+  @RequirePermission('sale:read')
   findAll(
-    @CurrentUser('organisationId') organizationId: string,
+    @CurrentActor() actor: RequestActor,
+    @CurrentBranch('branchIds') branchIds: string[],
     @Query() query: ListSalesDto,
   ) {
-    return this.salesService.findAll(organizationId, query);
+    return this.salesService.findAll(actor.organizationId, branchIds, query);
   }
 
   @Get(':id')
-  findOne(@CurrentUser('organisationId') organizationId: string, @Param('id') id: string) {
-    return this.salesService.findOne(organizationId, id);
+  @RequirePermission('sale:read')
+  findOne(
+    @CurrentActor() actor: RequestActor,
+    @CurrentBranch('branchIds') branchIds: string[],
+    @Param('id') id: string,
+  ) {
+    return this.salesService.findOne(actor.organizationId, branchIds, id);
   }
 
   @Post()
-  @Roles(Role.OWNER, Role.MANAGER, Role.INVENTORY_STAFF)
-  create(
-    @CurrentUser('organisationId') organizationId: string,
-    @CurrentUser('sub') userId: string,
+  @RequirePermission('sale:record')
+  async create(
+    @CurrentActor() actor: RequestActor,
+    @CurrentBranch() scope: BranchScope,
     @Body() dto: CreateSaleDto,
   ) {
-    return this.salesService.create(organizationId, userId, dto);
+    // A sale belongs to the branch that physically handed over the medicine.
+    const branchId = await this.branchAccess.writableBranchId(actor, scope);
+    return this.salesService.create(actor.organizationId, branchId, actor.userId, dto);
   }
 
   @Post(':id/void')
-  @Roles(Role.OWNER, Role.MANAGER)
+  @RequirePermission('sale:void')
   void(
-    @CurrentUser('organisationId') organizationId: string,
-    @CurrentUser('sub') userId: string,
+    @CurrentActor() actor: RequestActor,
+    @CurrentBranch('branchIds') branchIds: string[],
     @Param('id') id: string,
   ) {
-    return this.salesService.void(organizationId, userId, id);
+    return this.salesService.void(actor.organizationId, branchIds, actor.userId, id);
   }
 
   @Post(':id/returns')
-  @Roles(Role.OWNER, Role.MANAGER, Role.INVENTORY_STAFF)
+  @RequirePermission('sale:return')
   recordReturn(
-    @CurrentUser('organisationId') organizationId: string,
-    @CurrentUser('sub') userId: string,
+    @CurrentActor() actor: RequestActor,
+    @CurrentBranch('branchIds') branchIds: string[],
     @Param('id') id: string,
     @Body() dto: CreateSaleReturnDto,
   ) {
-    return this.salesService.recordReturn(organizationId, userId, id, dto);
+    return this.salesService.recordReturn(
+      actor.organizationId,
+      branchIds,
+      actor.userId,
+      id,
+      dto,
+    );
   }
 }

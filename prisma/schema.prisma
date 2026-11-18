@@ -4,11 +4,24 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+  // Pooled connection used by the running API (Supabase transaction pooler in
+  // production, a direct connection locally).
   url      = env("DATABASE_URL")
+  // Unpooled connection used by `prisma migrate` and `prisma db`, which need a
+  // session that can hold advisory locks and run DDL.
+  directUrl = env("DIRECT_URL")
 }
 
 enum Role {
   OWNER
+  ADMIN
+  BRANCH_MANAGER
+  PHARMACIST
+  INVENTORY_OFFICER
+  CASHIER
+  // Legacy workspace roles. They stay in the enum because existing memberships
+  // carry them; the permission catalogue gives each one a read/write set so an
+  // upgraded workspace behaves exactly as it did before branches existed.
   MANAGER
   INVENTORY_STAFF
   READ_ONLY
@@ -16,6 +29,36 @@ enum Role {
 
 enum UserStatus {
   ACTIVE
+  DEACTIVATED
+  SUSPENDED
+}
+
+enum BranchStatus {
+  ACTIVE
+  INACTIVE
+}
+
+/** Per-member grant or denial that wins over the role's default set. */
+enum PermissionEffect {
+  GRANT
+  DENY
+}
+
+enum TransferStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  IN_TRANSIT
+  RECEIVED
+  REJECTED
+  CANCELLED
+}
+
+/// Where a member stands inside one organisation. Access ends for SUSPENDED
+/// and DEACTIVATED members without touching the global User account.
+enum MembershipStatus {
+  ACTIVE
+  SUSPENDED
   DEACTIVATED
 }
 
@@ -35,6 +78,8 @@ enum MovementType {
   EXPIRED
   ADJUSTMENT
   REVERSAL
+  TRANSFER_OUT
+  TRANSFER_IN
 }
 
 enum SaleStatus {
@@ -54,10 +99,16 @@ model Organization {
   nearExpiryWarningDays Int       @default(90)
   defaultUnit     String?
   defaultMinStockLevel Decimal?   @db.Decimal(14, 3)
+  /// When true, a transfer waits in PENDING_APPROVAL before stock moves.
+  requireTransferApproval Boolean @default(false)
   onboardingCompletedAt DateTime?
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt
   memberships     Membership[]
+  branches        Branch[]
+  rolePermissions RolePermission[]
+  memberPermissions MemberPermission[]
+  transfers       StockTransfer[]
   products        Product[]
   batches         Batch[]
   movements       StockMovement[]
@@ -94,13 +145,20 @@ model User {
   memberships  Membership[]
   sessions     AuthSession[]
   passwordResets PasswordReset[]
+  branchAssignments BranchStaff[]
+  managedBranches Branch[]    @relation("BranchManager")
+  permissionOverrides MemberPermission[]
 }
 
 model Membership {
   organizationId String
   userId         String
   role           Role          @default(READ_ONLY)
+  /// Kept in step with `status` for the guards written before branches existed.
   active         Boolean       @default(true)
+  status         MembershipStatus @default(ACTIVE)
+  /// Why access was suspended or removed, shown on the staff detail page.
+  statusReason   String?
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
   organization   Organization  @relation(fields: [organizationId], references: [id])
@@ -108,6 +166,84 @@ model Membership {
 
   @@id([organizationId, userId])
   @@index([userId, active])
+}
+
+/**
+ * A location under one pharmacy organisation. The medicine catalogue is shared
+ * across branches; batches, balances, movements and sales belong to exactly one.
+ */
+model Branch {
+  id             String       @id @default(cuid())
+  organizationId String
+  name           String
+  /// Short human code, unique inside the organisation (for example MAIN, LEK-01).
+  code           String
+  address        String?
+  phone          String?
+  email          String?
+  managerUserId  String?
+  status         BranchStatus @default(ACTIVE)
+  /// The branch every legacy record was moved to; a workspace always has one.
+  isDefault      Boolean      @default(false)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  manager        User?        @relation("BranchManager", fields: [managerUserId], references: [id])
+  staff          BranchStaff[]
+  batches        Batch[]
+  movements      StockMovement[]
+  sales          Sale[]
+  receipts       StockReceipt[]
+  counts         StockCount[]
+  notifications  Notification[]
+  recipients     NotificationRecipient[]
+  auditLogs      AuditLog[]
+  importJobs     ImportJob[]
+  invitations    InvitationBranch[]
+  transfersOut   StockTransfer[] @relation("TransferSource")
+  transfersIn    StockTransfer[] @relation("TransferDestination")
+
+  @@unique([organizationId, code])
+  @@index([organizationId, status])
+}
+
+/** Which staff members may work in a branch. */
+model BranchStaff {
+  branchId  String
+  userId    String
+  createdAt DateTime @default(now())
+  branch    Branch   @relation(fields: [branchId], references: [id])
+  user      User     @relation(fields: [userId], references: [id])
+
+  @@id([branchId, userId])
+  @@index([userId])
+}
+
+/** Editable defaults: what a role may do in this organisation. */
+model RolePermission {
+  organizationId String
+  role           Role
+  permission     String
+  createdAt      DateTime     @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  @@id([organizationId, role, permission])
+  @@index([organizationId, role])
+}
+
+/** Per-member exception to the role defaults. */
+model MemberPermission {
+  organizationId String
+  userId         String
+  permission     String
+  effect         PermissionEffect @default(GRANT)
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  organization   Organization     @relation(fields: [organizationId], references: [id])
+  user           User             @relation(fields: [userId], references: [id])
+
+  @@id([organizationId, userId, permission])
+  @@index([userId])
 }
 
 model Product {
@@ -136,6 +272,7 @@ model Product {
   batches          Batch[]
   receiptLines     StockReceiptLine[]
   saleLines        SaleLine[]
+  transferLines    StockTransferLine[]
 
   @@unique([organizationId, barcode])
   @@unique([organizationId, sku])
@@ -147,6 +284,9 @@ model Batch {
   id             String         @id @default(cuid())
   organizationId String
   productId      String
+  /// Stock sits in exactly one branch. The same medicine can hold a batch per
+  /// branch, and no query may add quantities across branches.
+  branchId       String
   batchNumber    String?
   expiryDate     DateTime?
   unit           String
@@ -156,17 +296,26 @@ model Batch {
   updatedAt      DateTime       @updatedAt
   organization    Organization   @relation(fields: [organizationId], references: [id])
   product         Product        @relation(fields: [productId], references: [id])
+  branch          Branch         @relation(fields: [branchId], references: [id])
   balance         BatchBalance?
   movements       StockMovement[]
   saleLines       SaleLine[]
+  transferLinesOut StockTransferLine[] @relation("TransferSourceBatch")
+  transferLinesIn  StockTransferLine[] @relation("TransferDestinationBatch")
 
   @@index([organizationId, expiryDate])
   @@index([organizationId, productId])
+  @@index([branchId, productId, expiryDate])
+  // Expiry alert, near-expiry and expired queries filter organisation + branch
+  // scope and then range/sort on expiryDate; the product-scoped index above
+  // cannot serve that range because productId sits between the two columns.
+  @@index([organizationId, branchId, expiryDate])
 }
 
 model StockMovement {
   id              String       @id @default(cuid())
   organizationId  String
+  branchId        String
   batchId         String
   type            MovementType
   quantityDelta   Decimal      @db.Decimal(14, 3)
@@ -179,10 +328,12 @@ model StockMovement {
   reversalOfId    String?
   occurredAt      DateTime     @default(now())
   organization    Organization @relation(fields: [organizationId], references: [id])
+  branch          Branch       @relation(fields: [branchId], references: [id])
   batch           Batch        @relation(fields: [batchId], references: [id])
 
   @@unique([organizationId, idempotencyKey])
   @@index([organizationId, batchId, occurredAt])
+  @@index([organizationId, branchId, occurredAt])
 }
 
 model BatchBalance {
@@ -216,6 +367,7 @@ model Supplier {
 model StockReceipt {
   id                String             @id @default(cuid())
   organizationId    String
+  branchId          String
   supplierId        String?
   externalReference String?
   status            String             @default("DRAFT")
@@ -224,11 +376,13 @@ model StockReceipt {
   createdAt         DateTime           @default(now())
   updatedAt         DateTime           @updatedAt
   organization      Organization       @relation(fields: [organizationId], references: [id])
+  branch            Branch             @relation(fields: [branchId], references: [id])
   supplier          Supplier?          @relation(fields: [supplierId], references: [id])
   lines             StockReceiptLine[]
 
   @@index([organizationId, status])
   @@index([organizationId, receivedAt])
+  @@index([organizationId, branchId, receivedAt])
 }
 
 model StockReceiptLine {
@@ -250,6 +404,7 @@ model StockReceiptLine {
 model StockCount {
   id              String   @id @default(cuid())
   organizationId  String
+  branchId        String
   status          String   @default("DRAFT")
   scope           String   @default("ALL")
   startedAt       DateTime @default(now())
@@ -258,9 +413,11 @@ model StockCount {
   approverId      String?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+  branch          Branch   @relation(fields: [branchId], references: [id])
   lines           StockCountLine[]
 
   @@index([organizationId, status])
+  @@index([organizationId, branchId, startedAt])
 }
 
 model StockCountLine {
@@ -288,6 +445,8 @@ model NotificationPreference {
   /// Deprecated: milestone reminders (90/60/30/7/0 days) ignore the interval.
   reminderIntervalDays    Int      @default(7)
   dailyReportEnabled      Boolean  @default(false)
+  /// When true the daily report is produced per branch instead of consolidated.
+  dailyReportPerBranch    Boolean  @default(false)
   /// Local delivery time in HH:mm, evaluated in `dailyReportTimezone`.
   dailyReportTime         String   @default("20:00")
   /// Reporting timezone; falls back to the organisation timezone when null.
@@ -300,6 +459,8 @@ model NotificationPreference {
 model NotificationRecipient {
   id             String   @id @default(cuid())
   organizationId String
+  /// Optional: limits this recipient to one branch's alerts.
+  branchId       String?
   email          String
   name           String?
   active         Boolean  @default(true)
@@ -308,6 +469,7 @@ model NotificationRecipient {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
   organization   Organization @relation(fields: [organizationId], references: [id])
+  branch         Branch?      @relation(fields: [branchId], references: [id])
 
   @@unique([organizationId, email])
   @@index([organizationId, active])
@@ -316,6 +478,8 @@ model NotificationRecipient {
 model Notification {
   id             String   @id @default(cuid())
   organizationId String
+  /// The branch the alert belongs to; null for organisation-wide notices.
+  branchId       String?
   type           String
   title          String
   body           String
@@ -326,6 +490,7 @@ model Notification {
   metadata       Json?
   createdAt      DateTime @default(now())
   organization   Organization @relation(fields: [organizationId], references: [id])
+  branch         Branch?      @relation(fields: [branchId], references: [id])
   reads          NotificationRead[]
   deliveries     NotificationDelivery[]
 
@@ -367,6 +532,8 @@ model NotificationDelivery {
 model Sale {
   id              String     @id @default(cuid())
   organizationId  String
+  /// Every sale is booked against the branch that sold it.
+  branchId        String
   reference       String
   status          SaleStatus @default(COMPLETED)
   occurredAt      DateTime   @default(now())
@@ -391,12 +558,14 @@ model Sale {
   createdAt       DateTime   @default(now())
   updatedAt       DateTime   @updatedAt
   organization    Organization @relation(fields: [organizationId], references: [id])
+  branch          Branch       @relation(fields: [branchId], references: [id])
   lines           SaleLine[]
   returns         SaleReturn[]
 
   @@unique([organizationId, idempotencyKey])
   @@index([organizationId, occurredAt])
   @@index([organizationId, status, occurredAt])
+  @@index([organizationId, branchId, occurredAt])
 }
 
 model SaleLine {
@@ -457,6 +626,7 @@ model SaleReturnLine {
 model AuditLog {
   id             String   @id @default(cuid())
   organizationId String
+  branchId       String?
   actorId        String?
   action         String
   entityType     String
@@ -464,13 +634,18 @@ model AuditLog {
   metadata       Json?
   createdAt      DateTime @default(now())
   organization   Organization @relation(fields: [organizationId], references: [id])
+  branch         Branch?  @relation(fields: [branchId], references: [id])
 
   @@index([organizationId, createdAt])
+  @@index([organizationId, branchId, createdAt])
+  // The staff activity tab lists one member's entries, newest first.
+  @@index([organizationId, actorId, createdAt])
 }
 
 model ImportJob {
   id             String   @id @default(cuid())
   organizationId String
+  branchId       String?
   type           String
   filename       String
   status         String   @default("VALIDATED")
@@ -485,6 +660,7 @@ model ImportJob {
   createdAt      DateTime @default(now())
   completedAt    DateTime?
   organization   Organization @relation(fields: [organizationId], references: [id])
+  branch         Branch?  @relation(fields: [branchId], references: [id])
   rows           ImportJobRow[]
 
   @@index([organizationId, createdAt])
@@ -568,9 +744,13 @@ model StaffInvitation {
   invitedById    String
   acceptedById   String?
   acceptedAt     DateTime?
+  /// How many times the invitation email has been sent.
+  resendCount    Int              @default(0)
+  lastSentAt     DateTime?
   createdAt      DateTime         @default(now())
   updatedAt      DateTime         @updatedAt
   organization   Organization     @relation(fields: [organizationId], references: [id])
+  branches       InvitationBranch[]
 
   @@index([organizationId, status])
   @@index([email])
@@ -585,4 +765,72 @@ model OnboardingProgress {
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
   organization   Organization @relation(fields: [organizationId], references: [id])
+}
+
+/**
+ * A request to move stock from one branch to another. Quantities only ever
+ * leave the source when the transfer is dispatched and enter the destination
+ * when it is received, so the same units are never counted twice.
+ */
+model StockTransfer {
+  id             String         @id @default(cuid())
+  organizationId String
+  reference      String
+  fromBranchId   String
+  toBranchId     String
+  status         TransferStatus @default(DRAFT)
+  note           String?
+  requestedById  String?
+  approvedById   String?
+  dispatchedById String?
+  receivedById   String?
+  rejectedById   String?
+  rejectedReason String?
+  approvedAt     DateTime?
+  dispatchedAt   DateTime?
+  receivedAt     DateTime?
+  closedAt       DateTime?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  organization   Organization   @relation(fields: [organizationId], references: [id])
+  fromBranch     Branch         @relation("TransferSource", fields: [fromBranchId], references: [id])
+  toBranch       Branch         @relation("TransferDestination", fields: [toBranchId], references: [id])
+  lines          StockTransferLine[]
+
+  @@unique([organizationId, reference])
+  @@index([organizationId, status, createdAt])
+  @@index([organizationId, fromBranchId, createdAt])
+  @@index([organizationId, toBranchId, createdAt])
+}
+
+model StockTransferLine {
+  id                 String   @id @default(cuid())
+  transferId         String
+  productId          String
+  sourceBatchId      String
+  /// The batch created at the destination when the transfer is dispatched.
+  destinationBatchId String?
+  quantity           Decimal  @db.Decimal(14, 3)
+  receivedQuantity   Decimal  @default(0) @db.Decimal(14, 3)
+  /// Units that arrived short or damaged, excluded from the received count.
+  damagedQuantity    Decimal  @default(0) @db.Decimal(14, 3)
+  transfer           StockTransfer @relation(fields: [transferId], references: [id])
+  product            Product       @relation(fields: [productId], references: [id])
+  sourceBatch        Batch         @relation("TransferSourceBatch", fields: [sourceBatchId], references: [id])
+  destinationBatch   Batch?        @relation("TransferDestinationBatch", fields: [destinationBatchId], references: [id])
+
+  @@index([transferId])
+  @@index([sourceBatchId])
+  @@index([destinationBatchId])
+}
+
+/** Branch choices attached to a pending staff invitation. */
+model InvitationBranch {
+  invitationId String
+  branchId     String
+  invitation   StaffInvitation @relation(fields: [invitationId], references: [id])
+  branch       Branch         @relation(fields: [branchId], references: [id])
+
+  @@id([invitationId, branchId])
+  @@index([branchId])
 }

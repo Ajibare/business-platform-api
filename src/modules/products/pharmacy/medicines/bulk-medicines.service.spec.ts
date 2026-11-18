@@ -69,6 +69,7 @@ describe('BulkMedicinesService', () => {
   it('creates a medicine together with its opening batch', async () => {
     const result = await service.createMany(
       'org-1',
+      'branch-1',
       'user-1',
       dto([
         {
@@ -124,6 +125,7 @@ describe('BulkMedicinesService', () => {
 
     const result = await service.createMany(
       'org-1',
+      'branch-1',
       'user-1',
       dto([
         { name: 'Paracetamol', unit: 'tablet', batchNumber: 'B-1', quantity: 5 },
@@ -146,6 +148,7 @@ describe('BulkMedicinesService', () => {
 
     const result = await service.createMany(
       'org-1',
+      'branch-1',
       'user-1',
       dto([
         { name: 'Paracetamol', unit: 'tablet' },
@@ -167,6 +170,7 @@ describe('BulkMedicinesService', () => {
 
     const result = await service.createMany(
       'org-1',
+      'branch-1',
       'user-1',
       dto([
         {
@@ -189,6 +193,7 @@ describe('BulkMedicinesService', () => {
 
     const result = await service.createMany(
       'org-1',
+      'branch-1',
       'user-1',
       dto([
         {
@@ -220,6 +225,7 @@ describe('BulkMedicinesService', () => {
   it('rejects a batch row without a positive quantity', async () => {
     const result = await service.createMany(
       'org-1',
+      'branch-1',
       'user-1',
       dto([{ name: 'Paracetamol', unit: 'tablet', batchNumber: 'B-1' }]),
     );
@@ -232,6 +238,7 @@ describe('BulkMedicinesService', () => {
   it('rejects an expiry date that is not a real calendar date', async () => {
     const result = await service.createMany(
       'org-1',
+      'branch-1',
       'user-1',
       dto([{ name: 'Paracetamol', unit: 'tablet', batchNumber: 'B-1', quantity: 1, expiryDate: '2099-02-31' }]),
     );
@@ -247,6 +254,7 @@ describe('BulkMedicinesService', () => {
 
     const result = await service.createMany(
       'org-1',
+      'branch-1',
       'user-1',
       dto([{ name: 'Paracetamol', unit: 'tablet', sku: 'SKU-1' }]),
     );
@@ -258,6 +266,7 @@ describe('BulkMedicinesService', () => {
   it('warns about expired batches and loss-making prices without blocking the save', async () => {
     const result = await service.createMany(
       'org-1',
+      'branch-1',
       'user-1',
       dto([
         {
@@ -282,6 +291,7 @@ describe('BulkMedicinesService', () => {
   it('reports the last row as the position of a failed row', async () => {
     const result = await service.createMany(
       'org-1',
+      'branch-1',
       'user-1',
       dto([
         { name: 'Paracetamol', unit: 'tablet' },

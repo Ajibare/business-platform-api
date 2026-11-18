@@ -7,11 +7,12 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { InvitationStatus, Prisma, Role } from '@prisma/client';
+import { BranchStatus, InvitationStatus, Prisma, Role } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 import { PrismaService } from '../../../database/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { EmailService } from '../notifications/email.service';
+import type { PermissionKey } from '../permissions/permission-catalogue';
 import { AuthRequestLike, clientKey } from './auth-context';
 import { INVITATION_TTL_DAYS, PASSWORD_HASH_ROUNDS } from './auth.constants';
 import { AuthService, AuthSessionResult } from './auth.service';
@@ -26,12 +27,15 @@ export interface InvitationPreview {
   phone: string | null;
   hasAccount: boolean;
   expiresAt: string;
+  branchNames: string[];
 }
 
 interface InvitationContext {
   userId: string;
   organisationId: string;
   role: Role;
+  /** What the inviter may do; inviting is authorised by permission, not by role name. */
+  permissions: Set<PermissionKey>;
 }
 
 const PREVIEW_LIMIT = { limit: 30, windowMs: 10 * 60 * 1000 };
@@ -68,7 +72,8 @@ export class InvitationsService {
     context: InvitationContext,
     dto: CreateInvitationDto,
   ) {
-    this.assertCanInvite(context.role, dto.role);
+    this.assertCanInvite(context, dto.role);
+    const branches = await this.resolveBranches(context.organisationId, dto.branchIds);
 
     const email = dto.email ? normalizeEmail(dto.email) : null;
     const phone = dto.phone ? normalizePhone(dto.phone) : null;
@@ -131,6 +136,9 @@ export class InvitationsService {
         tokenHash: hashSecret(token),
         expiresAt,
         invitedById: context.userId,
+        branches: branches.length
+          ? { create: branches.map((branch) => ({ branchId: branch.id })) }
+          : undefined,
       },
       include: { organization: { select: { name: true } } },
     });
@@ -141,6 +149,9 @@ export class InvitationsService {
       subject: `You are invited to ${invitation.organization.name} on Pharmacy Stock Intelligence`,
       text: [
         `You have been invited to join ${invitation.organization.name} as ${this.roleLabel(dto.role)}.`,
+        ...(branches.length > 0
+          ? [`You will be working from ${branches.map((branch) => branch.name).join(', ')}.`]
+          : []),
         '',
         `Accept the invitation here. The link expires in ${INVITATION_TTL_DAYS} days and can only be used once:`,
         '',
@@ -156,7 +167,7 @@ export class InvitationsService {
       action: 'STAFF_INVITED',
       entityType: 'StaffInvitation',
       entityId: invitation.id,
-      metadata: { email, role: dto.role, delivered },
+      metadata: { email, role: dto.role, delivered, branchIds: branches.map((branch) => branch.id) },
     });
 
     return {
@@ -168,6 +179,7 @@ export class InvitationsService {
         status: invitation.status,
         expiresAt: invitation.expiresAt.toISOString(),
         delivered,
+        branchIds: branches.map((branch) => branch.id),
         ...(this.previewEnabled() ? { devInviteUrl: inviteUrl } : {}),
       },
     };
@@ -176,6 +188,7 @@ export class InvitationsService {
   async list(context: InvitationContext) {
     const invitations = await this.prisma.staffInvitation.findMany({
       where: { organizationId: context.organisationId },
+      include: { branches: { select: { branchId: true, branch: { select: { name: true } } } } },
       orderBy: { createdAt: 'desc' },
       take: 100,
     });
@@ -189,6 +202,10 @@ export class InvitationsService {
         status: this.effectiveStatus(invitation.status, invitation.expiresAt),
         expiresAt: invitation.expiresAt.toISOString(),
         acceptedAt: invitation.acceptedAt ? invitation.acceptedAt.toISOString() : null,
+        branchIds: invitation.branches.map((row) => row.branchId),
+        branchNames: invitation.branches.map((row) => row.branch.name),
+        resendCount: invitation.resendCount,
+        lastSentAt: invitation.lastSentAt ? invitation.lastSentAt.toISOString() : null,
         createdAt: invitation.createdAt.toISOString(),
       })),
     };
@@ -224,6 +241,84 @@ export class InvitationsService {
     return { data: { id: invitation.id, status: 'REVOKED' } };
   }
 
+  /**
+   * Sends a fresh link for a pending invitation. Replacing the token hash means
+   * the previous link stops working, so a leaked email cannot be replayed.
+   */
+  async resend(context: InvitationContext, invitationId: string) {
+    this.assertCanManage(context);
+
+    const invitation = await this.prisma.staffInvitation.findFirst({
+      where: { id: invitationId, organizationId: context.organisationId },
+      include: {
+        organization: { select: { name: true } },
+        branches: { select: { branch: { select: { name: true } } } },
+      },
+    });
+    if (!invitation) {
+      throw new NotFoundException({ code: 'NOT_FOUND', message: 'Invitation not found.' });
+    }
+    if (invitation.status !== 'PENDING') {
+      throw new BadRequestException({
+        code: 'INVITATION_NOT_PENDING',
+        message: 'Only a pending invitation can be sent again.',
+      });
+    }
+    if (!invitation.email) {
+      throw new BadRequestException({
+        code: 'CHANNEL_UNAVAILABLE',
+        message: 'This invitation has no email address to send to.',
+      });
+    }
+
+    const token = generateOpaqueToken();
+    const expiresAt = new Date(Date.now() + INVITATION_TTL_DAYS * 24 * 60 * 60 * 1000);
+    const now = new Date();
+    await this.prisma.staffInvitation.update({
+      where: { id: invitation.id },
+      data: {
+        tokenHash: hashSecret(token),
+        expiresAt,
+        resendCount: { increment: 1 },
+        lastSentAt: now,
+      },
+    });
+
+    const inviteUrl = `${this.webAppUrl()}/invite/${token}`;
+    const branchNames = invitation.branches.map((row) => row.branch.name);
+    const delivered = await this.email.sendTransactional({
+      to: invitation.email,
+      subject: `Reminder: your invitation to ${invitation.organization.name}`,
+      text: [
+        `You have been invited to join ${invitation.organization.name} as ${this.roleLabel(invitation.role as InvitableRole)}.`,
+        ...(branchNames.length > 0 ? [`You will be working from ${branchNames.join(', ')}.`] : []),
+        '',
+        `Accept the invitation here. The link expires in ${INVITATION_TTL_DAYS} days and can only be used once:`,
+        '',
+        inviteUrl,
+      ].join('\n'),
+    });
+
+    await this.audit.record({
+      organizationId: context.organisationId,
+      actorId: context.userId,
+      action: 'INVITATION_RESENT',
+      entityType: 'StaffInvitation',
+      entityId: invitation.id,
+      metadata: { email: invitation.email, delivered, branchNames },
+    });
+
+    return {
+      data: {
+        id: invitation.id,
+        email: invitation.email,
+        expiresAt: expiresAt.toISOString(),
+        delivered,
+        ...(this.previewEnabled() ? { devInviteUrl: inviteUrl } : {}),
+      },
+    };
+  }
+
   // -------------------------------------------------------------------- public
 
   async preview(rawToken: string, request: AuthRequestLike): Promise<{ data: InvitationPreview }> {
@@ -252,6 +347,7 @@ export class InvitationsService {
         phone: invitation.phone,
         hasAccount: Boolean(hasAccount),
         expiresAt: invitation.expiresAt.toISOString(),
+        branchNames: invitation.branches.map((row) => row.branch.name),
       },
     };
   }
@@ -330,6 +426,7 @@ export class InvitationsService {
       });
 
       await this.createMembership(tx, invitation.organizationId, user.id, invitation.role);
+      await this.assignInvitedBranches(tx, user.id, invitation.branches);
       await tx.staffInvitation.update({
         where: { id: invitation.id },
         data: { status: 'ACCEPTED', acceptedById: user.id, acceptedAt: now },
@@ -388,6 +485,7 @@ export class InvitationsService {
     const now = new Date();
     await this.prisma.$transaction(async (tx) => {
       await this.createMembership(tx, invitation.organizationId, user.id, invitation.role);
+      await this.assignInvitedBranches(tx, user.id, invitation.branches);
       await tx.staffInvitation.update({
         where: { id: invitation.id },
         data: { status: 'ACCEPTED', acceptedById: user.id, acceptedAt: now },
@@ -440,7 +538,10 @@ export class InvitationsService {
 
     const invitation = await this.prisma.staffInvitation.findFirst({
       where: { tokenHash: hashSecret(token) },
-      include: { organization: { select: { name: true } } },
+      include: {
+        organization: { select: { name: true } },
+        branches: { select: { branchId: true, branch: { select: { name: true } } } },
+      },
     });
 
     if (!invitation) {
@@ -471,15 +572,67 @@ export class InvitationsService {
     return invitation;
   }
 
-  private assertCanInvite(actorRole: Role, invitedRole: InvitableRole): void {
-    if (actorRole === 'OWNER') return;
-    if (actorRole === 'MANAGER' && (invitedRole === 'INVENTORY_STAFF' || invitedRole === 'READ_ONLY')) {
-      return;
-    }
-    throw new ForbiddenException({
-      code: 'FORBIDDEN',
-      message: 'You do not have permission to invite that role.',
+  /** Confirms the branches exist in this organisation and are still active. */
+  private async resolveBranches(organizationId: string, branchIds?: string[]) {
+    const ids = [...new Set((branchIds ?? []).map((id) => id.trim()).filter(Boolean))];
+    if (ids.length === 0) return [] as { id: string; name: string }[];
+
+    const branches = await this.prisma.branch.findMany({
+      where: { organizationId, id: { in: ids } },
+      select: { id: true, name: true, status: true },
     });
+    if (branches.length !== ids.length) {
+      throw new BadRequestException({
+        code: 'INVALID_BRANCH',
+        message: 'One of the selected branches does not belong to this organisation.',
+        field: 'branchIds',
+      });
+    }
+    if (branches.some((branch) => branch.status !== BranchStatus.ACTIVE)) {
+      throw new BadRequestException({
+        code: 'BRANCH_INACTIVE',
+        message: 'Staff can only be invited to an active branch.',
+        field: 'branchIds',
+      });
+    }
+    return branches;
+  }
+
+  /** Gives the new member the branches that were recorded on the invitation. */
+  private async assignInvitedBranches(
+    tx: Prisma.TransactionClient,
+    userId: string,
+    branches: { branchId: string }[],
+  ): Promise<void> {
+    if (branches.length === 0) return;
+    await tx.branchStaff.createMany({
+      data: branches.map((row) => ({ branchId: row.branchId, userId })),
+      skipDuplicates: true,
+    });
+  }
+
+  private assertCanManage(context: InvitationContext): void {
+    if (!context.permissions.has('staff:manage')) {
+      throw new ForbiddenException({
+        code: 'FORBIDDEN',
+        message: 'You do not have permission to manage staff invitations.',
+      });
+    }
+  }
+
+  /**
+   * Inviting is authorised by permission, never by role name. Handing out
+   * administrator access also needs the permission-configuration right, so only
+   * the owner can create another administrator.
+   */
+  private assertCanInvite(context: InvitationContext, invitedRole: InvitableRole): void {
+    this.assertCanManage(context);
+    if (invitedRole === 'ADMIN' && !context.permissions.has('staff:permissions')) {
+      throw new ForbiddenException({
+        code: 'FORBIDDEN',
+        message: 'Only the owner can invite an administrator.',
+      });
+    }
   }
 
   private effectiveStatus(status: InvitationStatus, expiresAt: Date): InvitationStatus | 'EXPIRED' {
@@ -489,10 +642,18 @@ export class InvitationsService {
 
   private roleLabel(role: InvitableRole): string {
     switch (role) {
+      case 'ADMIN':
+        return 'an Administrator';
+      case 'BRANCH_MANAGER':
       case 'MANAGER':
-        return 'a Manager';
+        return 'a Branch manager';
+      case 'PHARMACIST':
+        return 'a Pharmacist';
+      case 'INVENTORY_OFFICER':
       case 'INVENTORY_STAFF':
-        return 'Inventory staff';
+        return 'an Inventory officer';
+      case 'CASHIER':
+        return 'a Cashier';
       default:
         return 'Read-only access';
     }

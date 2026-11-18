@@ -2,36 +2,61 @@ import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/co
 import { BatchesService } from './batches.service';
 import { CreateBatchDto } from './dto/create-batch.dto';
 import { ListBatchesDto } from './dto/list-batches.dto';
-import { CurrentUser } from '../../../../common/decorators/current-user.decorator';
+import { CurrentActor } from '../../../../common/decorators/current-actor.decorator';
+import { CurrentBranch } from '../../../../common/decorators/current-branch.decorator';
+import { RequirePermission } from '../../../../common/decorators/require-permission.decorator';
 import { JwtAuthGuard } from '../../../../common/guards/jwt-auth.guard';
-import { RolesGuard } from '../../../../common/guards/roles.guard';
-import { Roles } from '../../../../common/decorators/roles.decorator';
-import { Role } from '@prisma/client';
+import { PermissionsGuard } from '../../../../common/guards/permissions.guard';
+import { BranchScopeGuard } from '../../../../common/guards/branch-scope.guard';
+import {
+  BranchAccessService,
+  type BranchScope,
+  type RequestActor,
+} from '../../../platform/branches/branch-access.service';
 
 @Controller('pharmacy/batches')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard, BranchScopeGuard)
 export class BatchesController {
-  constructor(private readonly batchesService: BatchesService) {}
+  constructor(
+    private readonly batchesService: BatchesService,
+    private readonly branchAccess: BranchAccessService,
+  ) {}
 
   @Get()
-  findAll(@CurrentUser('organisationId') organizationId: string, @Query() query: ListBatchesDto) {
-    return this.batchesService.findAll(organizationId, query);
+  @RequirePermission('inventory:read')
+  findAll(
+    @CurrentActor() actor: RequestActor,
+    @CurrentBranch('branchIds') branchIds: string[],
+    @Query() query: ListBatchesDto,
+  ) {
+    return this.batchesService.findAll(actor.organizationId, branchIds, query);
   }
 
   @Post()
-  @Roles(Role.OWNER, Role.MANAGER, Role.INVENTORY_STAFF)
+  @RequirePermission('inventory:receive')
   async create(
-    @CurrentUser('organisationId') organizationId: string,
-    @CurrentUser('sub') userId: string,
+    @CurrentActor() actor: RequestActor,
+    @CurrentBranch() scope: BranchScope,
     @Body() dto: CreateBatchDto,
   ) {
-    const batch = await this.batchesService.create(organizationId, userId, dto);
+    const branchId = await this.branchAccess.writableBranchId(actor, scope);
+    const batch = await this.batchesService.create(
+      actor.organizationId,
+      branchId,
+      actor.userId,
+      dto,
+    );
     return { data: batch };
   }
 
   @Get(':id')
-  async findOne(@CurrentUser('organisationId') organizationId: string, @Param('id') id: string) {
-    const batch = await this.batchesService.findOne(organizationId, id);
+  @RequirePermission('inventory:read')
+  async findOne(
+    @CurrentActor() actor: RequestActor,
+    @CurrentBranch('branchIds') branchIds: string[],
+    @Param('id') id: string,
+  ) {
+    const batch = await this.batchesService.findOne(actor.organizationId, branchIds, id);
     return { data: batch };
   }
 }

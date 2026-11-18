@@ -46,7 +46,11 @@ export class BarcodesService {
     private readonly auditService: AuditService,
   ) {}
 
-  async lookup(organizationId: string, rawCode: string): Promise<BarcodeLookupRecord> {
+  async lookup(
+    organizationId: string,
+    branchIds: string[],
+    rawCode: string,
+  ): Promise<BarcodeLookupRecord> {
     const code = normalizeBarcode(rawCode);
     if (!code) {
       throw new BadRequestException({
@@ -58,7 +62,10 @@ export class BarcodesService {
     const product = await this.prisma.product.findFirst({
       where: { organizationId, barcode: code },
       include: {
+        // Only the batches the caller can see: a cashier never sees another
+        // branch's quantity through a barcode scan.
         batches: {
+          where: { branchId: { in: branchIds } },
           include: { balance: { select: { quantity: true } } },
           orderBy: { expiryDate: 'asc' },
         },

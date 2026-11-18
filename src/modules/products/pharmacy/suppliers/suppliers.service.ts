@@ -52,26 +52,31 @@ export class SuppliersService {
     const offset = query.offset ?? 0;
     const search = query.q?.trim();
 
-    const suppliers = await this.prisma.supplier.findMany({
-      where: {
-        organizationId,
-        ...(query.active !== undefined ? { active: query.active } : {}),
-        ...(search
-          ? {
-              OR: [
-                { name: { contains: search, mode: 'insensitive' } },
-                { phone: { contains: search, mode: 'insensitive' } },
-                { email: { contains: search, mode: 'insensitive' } },
-              ],
-            }
-          : {}),
-      },
-      orderBy: { updatedAt: 'desc' },
-      take: limit,
-      skip: offset,
-    });
+    const where = {
+      organizationId,
+      ...(query.active !== undefined ? { active: query.active } : {}),
+      ...(search
+        ? {
+            OR: [
+              { name: { contains: search, mode: 'insensitive' as const } },
+              { phone: { contains: search, mode: 'insensitive' as const } },
+              { email: { contains: search, mode: 'insensitive' as const } },
+            ],
+          }
+        : {}),
+    };
 
-    const total = await this.prisma.supplier.count({ where: { organizationId } });
+    // The count has to use the same filter as the page, otherwise a search
+    // reports the size of the whole list.
+    const [suppliers, total] = await Promise.all([
+      this.prisma.supplier.findMany({
+        where,
+        orderBy: { updatedAt: 'desc' },
+        take: limit,
+        skip: offset,
+      }),
+      this.prisma.supplier.count({ where }),
+    ]);
 
     return {
       data: suppliers.map((supplier) => this.toRecord(supplier)),

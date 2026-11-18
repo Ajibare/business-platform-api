@@ -98,6 +98,17 @@ export class ExpiryRemindersService {
       const recipients = preferences.emailEnabled
         ? await this.notifications.activeRecipients(organization.id, 'expiry')
         : [];
+      // Branch tagged recipients only hear about their own branch's batches.
+      const recipientsByBranch = new Map<string, string[]>();
+      const recipientsFor = async (branchId: string): Promise<string[]> => {
+        const cached = recipientsByBranch.get(branchId);
+        if (cached) return cached;
+        const tagged = recipients
+          .filter((recipient) => recipient.branchId === null || recipient.branchId === branchId)
+          .map((recipient) => recipient.email);
+        recipientsByBranch.set(branchId, tagged);
+        return tagged;
+      };
 
       for (const batch of batches) {
         if (!batch.expiryDate) continue;
@@ -119,6 +130,7 @@ export class ExpiryRemindersService {
         const createdAt = await this.createReminder({
           organizationId: organization.id,
           organizationName: organization.name,
+          branchId: batch.branchId,
           batchId: batch.id,
           productId: batch.productId,
           productName: batch.product.name,
@@ -142,12 +154,14 @@ export class ExpiryRemindersService {
 
         summary.remindersCreated += 1;
 
-        if (preferences.emailEnabled && recipients.length > 0) {
+        if (preferences.emailEnabled) {
+          const branchRecipients = await recipientsFor(batch.branchId);
+          if (branchRecipients.length === 0) continue;
           const notificationId = createdAt.notificationId;
           summary.emailsQueued += await this.email.queueForNotification(
             organization.id,
             notificationId,
-            recipients.map((recipient) => recipient.email),
+            branchRecipients,
           );
           const outcome = await this.email.sendPendingForNotification(notificationId);
           summary.emailsSent += outcome.sent;
@@ -177,6 +191,7 @@ export class ExpiryRemindersService {
   private async createReminder(input: {
     organizationId: string;
     organizationName: string;
+    branchId: string;
     batchId: string;
     productId: string;
     productName: string;
@@ -220,6 +235,7 @@ export class ExpiryRemindersService {
       const notification = await this.prisma.notification.create({
         data: {
           organizationId: input.organizationId,
+          branchId: input.branchId,
           type: EXPIRY_NOTIFICATION_TYPE,
           title: copy.title,
           body: copy.body,

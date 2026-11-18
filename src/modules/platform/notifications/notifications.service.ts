@@ -26,6 +26,8 @@ export interface NotificationPreferenceRecord {
   reminderLeadDays: number;
   reminderIntervalDays: number;
   dailyReportEnabled: boolean;
+  /** True when each branch gets its own report instead of one consolidated email. */
+  dailyReportPerBranch: boolean;
   dailyReportTime: string;
   dailyReportTimezone: string | null;
   updatedAt: Date;
@@ -41,6 +43,7 @@ function toPreferenceRecord(preferences: NotificationPreference): NotificationPr
     reminderLeadDays: preferences.reminderLeadDays,
     reminderIntervalDays: preferences.reminderIntervalDays,
     dailyReportEnabled: preferences.dailyReportEnabled,
+    dailyReportPerBranch: preferences.dailyReportPerBranch,
     dailyReportTime: normaliseDeliveryTime(preferences.dailyReportTime),
     dailyReportTimezone: preferences.dailyReportTimezone,
     updatedAt: preferences.updatedAt,
@@ -117,6 +120,9 @@ export class NotificationsService {
         ...(dto.dailyReportEnabled !== undefined
           ? { dailyReportEnabled: dto.dailyReportEnabled }
           : {}),
+        ...(dto.dailyReportPerBranch !== undefined
+          ? { dailyReportPerBranch: dto.dailyReportPerBranch }
+          : {}),
         ...(dto.dailyReportTime !== undefined
           ? { dailyReportTime: normaliseDeliveryTime(dto.dailyReportTime) }
           : {}),
@@ -136,7 +142,12 @@ export class NotificationsService {
     return toPreferenceRecord(updated);
   }
 
-  async listNotifications(organizationId: string, userId: string, query: ListNotificationsDto) {
+  async listNotifications(
+    organizationId: string,
+    userId: string,
+    branchIds: string[],
+    query: ListNotificationsDto,
+  ) {
     const preferences = await this.getPreferences(organizationId);
     if (!preferences.inAppEnabled) {
       return { data: [], meta: { total: 0, unread: 0, inAppEnabled: false } };
@@ -144,10 +155,14 @@ export class NotificationsService {
 
     const limit = query.limit ?? 50;
     const unreadOnly = query.unreadOnly === 'true';
+    // Organisation-wide notices are visible everywhere; branch notices only in
+    // the branches the member may read.
+    const visible = { OR: [{ branchId: null }, { branchId: { in: branchIds } }] };
 
     const notifications = await this.prisma.notification.findMany({
       where: {
         organizationId,
+        ...visible,
         ...(unreadOnly ? { reads: { none: { userId } } } : {}),
       },
       orderBy: { createdAt: 'desc' },
@@ -156,12 +171,13 @@ export class NotificationsService {
     });
 
     const unread = await this.prisma.notification.count({
-      where: { organizationId, reads: { none: { userId } } },
+      where: { organizationId, ...visible, reads: { none: { userId } } },
     });
 
     return {
       data: notifications.map((notification) => ({
         id: notification.id,
+        branchId: notification.branchId,
         type: notification.type,
         title: notification.title,
         body: notification.body,
@@ -176,14 +192,18 @@ export class NotificationsService {
     };
   }
 
-  async unreadCount(organizationId: string, userId: string) {
+  async unreadCount(organizationId: string, userId: string, branchIds: string[]) {
     const preferences = await this.getPreferences(organizationId);
     if (!preferences.inAppEnabled) {
       return { data: { unread: 0, inAppEnabled: false } };
     }
 
     const unread = await this.prisma.notification.count({
-      where: { organizationId, reads: { none: { userId } } },
+      where: {
+        organizationId,
+        OR: [{ branchId: null }, { branchId: { in: branchIds } }],
+        reads: { none: { userId } },
+      },
     });
     return { data: { unread, inAppEnabled: true } };
   }
@@ -206,9 +226,13 @@ export class NotificationsService {
     return { data: { id: notificationId, readAt: read.readAt } };
   }
 
-  async markAllRead(organizationId: string, userId: string) {
+  async markAllRead(organizationId: string, userId: string, branchIds: string[]) {
     const unread = await this.prisma.notification.findMany({
-      where: { organizationId, reads: { none: { userId } } },
+      where: {
+        organizationId,
+        OR: [{ branchId: null }, { branchId: { in: branchIds } }],
+        reads: { none: { userId } },
+      },
       select: { id: true },
     });
 
@@ -231,6 +255,7 @@ export class NotificationsService {
     return {
       data: recipients.map((recipient) => ({
         id: recipient.id,
+        branchId: recipient.branchId,
         email: recipient.email,
         name: recipient.name,
         active: recipient.active,
@@ -372,14 +397,25 @@ export class NotificationsService {
     return { data: { id, active: false } };
   }
 
-  async activeRecipients(organizationId: string, purpose: 'expiry' | 'sales') {
+  async activeRecipients(
+    organizationId: string,
+    purpose: 'expiry' | 'sales',
+    branchId?: string | null,
+  ) {
     return this.prisma.notificationRecipient.findMany({
       where: {
         organizationId,
         active: true,
+        // A branch report only reaches recipients tagged for that branch;
+        // an organisation report only reaches untagged recipients.
+        ...(branchId === undefined
+          ? {}
+          : branchId === null
+            ? { branchId: null }
+            : { OR: [{ branchId }, { branchId: null }] }),
         ...(purpose === 'expiry' ? { receivesExpiry: true } : { receivesSales: true }),
       },
-      select: { email: true },
+      select: { email: true, branchId: true },
     });
   }
 }

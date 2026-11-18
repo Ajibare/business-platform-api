@@ -23,6 +23,7 @@ export interface StockOnHandRecord {
 export interface MovementRecord {
   id: string;
   organizationId: string;
+  branchId: string;
   batchId: string;
   type: string;
   quantityDelta: number;
@@ -39,8 +40,21 @@ export interface MovementRecord {
 export class InventoryService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async create(organizationId: string, actorId: string, dto: CreateMovementDto): Promise<MovementRecord> {
-    const batch = await this.prisma.batch.findFirst({ where: { id: dto.batchId, organizationId } });
+  /**
+   * Records a movement against a batch in `branchId`.
+   *
+   * The batch is looked up inside the branch, so a batch id from another branch
+   * behaves exactly like a batch that does not exist.
+   */
+  async create(
+    organizationId: string,
+    branchId: string,
+    actorId: string,
+    dto: CreateMovementDto,
+  ): Promise<MovementRecord> {
+    const batch = await this.prisma.batch.findFirst({
+      where: { id: dto.batchId, organizationId, branchId },
+    });
     if (!batch) {
       throw new NotFoundException({ code: 'NOT_FOUND', message: 'Batch not found' });
     }
@@ -55,6 +69,7 @@ export class InventoryService {
       return {
         id: existing.id,
         organizationId: existing.organizationId,
+        branchId: existing.branchId,
         batchId: existing.batchId,
         type: existing.type,
         quantityDelta: this.toQuantity(existing.quantityDelta),
@@ -102,6 +117,7 @@ export class InventoryService {
       const created = await tx.stockMovement.create({
         data: {
           organizationId,
+          branchId: batch.branchId,
           batchId: batch.id,
           type: dto.type,
           quantityDelta,
@@ -137,6 +153,7 @@ export class InventoryService {
     return {
       id: movement.movement.id,
       organizationId: movement.movement.organizationId,
+      branchId: movement.movement.branchId,
       batchId: movement.movement.batchId,
       type: movement.movement.type,
       quantityDelta: this.toQuantity(movement.movement.quantityDelta),
@@ -156,6 +173,7 @@ export class InventoryService {
    */
   async stockOnHand(
     organizationId: string,
+    branchIds: string[],
     query: ListStockDto = {},
   ): Promise<{ data: StockOnHandRecord[] }> {
     const organization = await this.prisma.organization.findUnique({
@@ -190,7 +208,11 @@ export class InventoryService {
       where: {
         organizationId,
         quantity: { gt: 0 },
-        batch: { productId: { in: products.map((product) => product.id) } },
+        batch: {
+          productId: { in: products.map((product) => product.id) },
+          // Quantities are per branch: never add stock from another location.
+          branchId: { in: branchIds },
+        },
       },
       select: {
         quantity: true,
@@ -244,10 +266,11 @@ export class InventoryService {
     return { data: [...byProduct.values()] };
   }
 
-  async findAll(organizationId: string, query: ListMovementsDto) {
+  async findAll(organizationId: string, branchIds: string[], query: ListMovementsDto) {
     const movements = await this.prisma.stockMovement.findMany({
       where: {
         organizationId,
+        branchId: { in: branchIds },
         ...(query.batchId ? { batchId: query.batchId } : {}),
         ...(query.type ? { type: query.type } : {}),
         ...(query.from || query.to
@@ -266,6 +289,7 @@ export class InventoryService {
     const items = movements.map((movement) => ({
       id: movement.id,
       organizationId: movement.organizationId,
+      branchId: movement.branchId,
       batchId: movement.batchId,
       type: movement.type,
       quantityDelta: this.toQuantity(movement.quantityDelta),

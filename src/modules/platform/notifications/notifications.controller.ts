@@ -9,7 +9,6 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
-import { Role } from '@prisma/client';
 import { NotificationsService } from './notifications.service';
 import { EmailService } from './email.service';
 import { ExpiryRemindersService } from './expiry-reminders.service';
@@ -18,13 +17,16 @@ import { UpdateNotificationPreferencesDto } from './dto/update-preferences.dto';
 import { CreateNotificationRecipientDto } from './dto/create-recipient.dto';
 import { UpdateNotificationRecipientDto } from './dto/update-recipient.dto';
 import { ListNotificationsDto } from './dto/list-notifications.dto';
-import { CurrentUser } from '../../../common/decorators/current-user.decorator';
+import { CurrentActor } from '../../../common/decorators/current-actor.decorator';
+import { CurrentBranch } from '../../../common/decorators/current-branch.decorator';
+import { RequirePermission } from '../../../common/decorators/require-permission.decorator';
 import { JwtAuthGuard } from '../../../common/guards/jwt-auth.guard';
-import { RolesGuard } from '../../../common/guards/roles.guard';
-import { Roles } from '../../../common/decorators/roles.decorator';
+import { PermissionsGuard } from '../../../common/guards/permissions.guard';
+import { BranchScopeGuard } from '../../../common/guards/branch-scope.guard';
+import type { RequestActor } from '../branches/branch-access.service';
 
 @Controller('notifications')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard, BranchScopeGuard)
 export class NotificationsController {
   constructor(
     private readonly notificationsService: NotificationsService,
@@ -34,23 +36,31 @@ export class NotificationsController {
   ) {}
 
   @Get()
+  @RequirePermission('notification:read')
   list(
-    @CurrentUser('organisationId') organizationId: string,
-    @CurrentUser('sub') userId: string,
+    @CurrentActor() actor: RequestActor,
+    @CurrentBranch('branchIds') branchIds: string[],
     @Query() query: ListNotificationsDto,
   ) {
-    return this.notificationsService.listNotifications(organizationId, userId, query);
+    return this.notificationsService.listNotifications(
+      actor.organizationId,
+      actor.userId,
+      branchIds,
+      query,
+    );
   }
 
   @Get('unread-count')
+  @RequirePermission('notification:read')
   unreadCount(
-    @CurrentUser('organisationId') organizationId: string,
-    @CurrentUser('sub') userId: string,
+    @CurrentActor() actor: RequestActor,
+    @CurrentBranch('branchIds') branchIds: string[],
   ) {
-    return this.notificationsService.unreadCount(organizationId, userId);
+    return this.notificationsService.unreadCount(actor.organizationId, actor.userId, branchIds);
   }
 
   @Get('capabilities')
+  @RequirePermission('notification:read')
   capabilities() {
     return {
       data: {
@@ -59,141 +69,149 @@ export class NotificationsController {
         expiryReminders: true,
         salesNotificationsAvailable: true,
         dailySalesReports: true,
+        dailyReportPerBranch: true,
         emailTransport: this.emailService.activeTransport,
       },
     };
   }
 
   @Get('preferences')
-  getPreferences(@CurrentUser('organisationId') organizationId: string) {
+  @RequirePermission('notification:read')
+  getPreferences(@CurrentActor() actor: RequestActor) {
     return this.notificationsService
-      .getPreferences(organizationId)
+      .getPreferences(actor.organizationId)
       .then((preferences) => ({ data: preferences }));
   }
 
   @Patch('preferences')
-  @Roles(Role.OWNER, Role.MANAGER)
+  @RequirePermission('notification:manage')
   async updatePreferences(
-    @CurrentUser('organisationId') organizationId: string,
-    @CurrentUser('sub') userId: string,
+    @CurrentActor() actor: RequestActor,
     @Body() dto: UpdateNotificationPreferencesDto,
   ) {
     const preferences = await this.notificationsService.updatePreferences(
-      organizationId,
-      userId,
+      actor.organizationId,
+      actor.userId,
       dto,
     );
     return { data: preferences };
   }
 
-  /** Preview of the daily sales summary for the current or requested business day. */
+  /**
+   * Preview of the daily sales summary for the current or requested business
+   * day: one report, or one per branch when the workspace reports per branch.
+   */
   @Get('daily-report')
-  @Roles(Role.OWNER, Role.MANAGER)
+  @RequirePermission('report:read')
   async previewDailyReport(
-    @CurrentUser('organisationId') organizationId: string,
+    @CurrentActor() actor: RequestActor,
     @Query('date') date?: string,
   ) {
-    const report = await this.dailyReportService.buildReport(organizationId, date);
-    return { data: report };
+    const reports = await this.dailyReportService.buildReports(actor.organizationId, date);
+    return { data: { reports } };
   }
 
   /** Sends the daily summary immediately, ignoring the configured delivery time. */
   @Post('daily-report/send')
-  @Roles(Role.OWNER, Role.MANAGER)
+  @RequirePermission('notification:manage')
   async sendDailyReport(
-    @CurrentUser('organisationId') organizationId: string,
-    @CurrentUser('sub') userId: string,
+    @CurrentActor() actor: RequestActor,
     @Body() body: { date?: string },
   ) {
-    const result = await this.dailyReportService.sendNow(organizationId, userId, body?.date);
+    const result = await this.dailyReportService.sendNow(
+      actor.organizationId,
+      actor.userId,
+      body?.date,
+    );
     return { data: result };
   }
 
   @Get('recipients')
-  listRecipients(@CurrentUser('organisationId') organizationId: string) {
-    return this.notificationsService.listRecipients(organizationId);
+  @RequirePermission('notification:read')
+  listRecipients(@CurrentActor() actor: RequestActor) {
+    return this.notificationsService.listRecipients(actor.organizationId);
   }
 
   @Post('recipients')
-  @Roles(Role.OWNER, Role.MANAGER)
+  @RequirePermission('notification:manage')
   createRecipient(
-    @CurrentUser('organisationId') organizationId: string,
-    @CurrentUser('sub') userId: string,
+    @CurrentActor() actor: RequestActor,
     @Body() dto: CreateNotificationRecipientDto,
   ) {
-    return this.notificationsService.createRecipient(organizationId, userId, dto);
+    return this.notificationsService.createRecipient(actor.organizationId, actor.userId, dto);
   }
 
   @Patch('recipients/:id')
-  @Roles(Role.OWNER, Role.MANAGER)
+  @RequirePermission('notification:manage')
   updateRecipient(
-    @CurrentUser('organisationId') organizationId: string,
-    @CurrentUser('sub') userId: string,
+    @CurrentActor() actor: RequestActor,
     @Param('id') id: string,
     @Body() dto: UpdateNotificationRecipientDto,
   ) {
-    return this.notificationsService.updateRecipient(organizationId, userId, id, dto);
+    return this.notificationsService.updateRecipient(
+      actor.organizationId,
+      actor.userId,
+      id,
+      dto,
+    );
   }
 
   @Delete('recipients/:id')
-  @Roles(Role.OWNER, Role.MANAGER)
+  @RequirePermission('notification:manage')
   deactivateRecipient(
-    @CurrentUser('organisationId') organizationId: string,
-    @CurrentUser('sub') userId: string,
+    @CurrentActor() actor: RequestActor,
     @Param('id') id: string,
   ) {
-    return this.notificationsService.deactivateRecipient(organizationId, userId, id);
+    return this.notificationsService.deactivateRecipient(actor.organizationId, actor.userId, id);
   }
 
   @Get('deliveries')
-  @Roles(Role.OWNER, Role.MANAGER)
+  @RequirePermission('notification:manage')
   listDeliveries(
-    @CurrentUser('organisationId') organizationId: string,
+    @CurrentActor() actor: RequestActor,
     @Query('status') status?: string,
     @Query('limit') limit?: string,
   ) {
     return this.emailService.listDeliveries(
-      organizationId,
+      actor.organizationId,
       status || undefined,
       limit ? Number(limit) : 50,
     );
   }
 
   @Post('deliveries/:id/retry')
-  @Roles(Role.OWNER, Role.MANAGER)
+  @RequirePermission('notification:manage')
   retryDelivery(
-    @CurrentUser('organisationId') organizationId: string,
+    @CurrentActor() actor: RequestActor,
     @Param('id') id: string,
   ) {
-    return this.emailService.retryDelivery(organizationId, id);
+    return this.emailService.retryDelivery(actor.organizationId, id);
   }
 
   @Post('read-all')
+  @RequirePermission('notification:read')
   markAllRead(
-    @CurrentUser('organisationId') organizationId: string,
-    @CurrentUser('sub') userId: string,
+    @CurrentActor() actor: RequestActor,
+    @CurrentBranch('branchIds') branchIds: string[],
   ) {
-    return this.notificationsService.markAllRead(organizationId, userId);
+    return this.notificationsService.markAllRead(actor.organizationId, actor.userId, branchIds);
   }
 
   @Post(':id/read')
+  @RequirePermission('notification:read')
   markRead(
-    @CurrentUser('organisationId') organizationId: string,
-    @CurrentUser('sub') userId: string,
+    @CurrentActor() actor: RequestActor,
     @Param('id') id: string,
   ) {
-    return this.notificationsService.markRead(organizationId, userId, id);
+    return this.notificationsService.markRead(actor.organizationId, actor.userId, id);
   }
 
   @Post('expiry-scan')
-  @Roles(Role.OWNER, Role.MANAGER)
-  async runExpiryScan(
-    @CurrentUser('organisationId') organizationId: string,
-    @CurrentUser('sub') userId: string,
-  ) {
+  @RequirePermission('expiry:read')
+  async runExpiryScan(@CurrentActor() actor: RequestActor) {
     const summary = await this.expiryRemindersService.runScan({
-      organizationId,
-      actorId: userId,
+      organizationId: actor.organizationId,
+      actorId: actor.userId,
       trigger: 'manual',
     });
     return { data: summary };

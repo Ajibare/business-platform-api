@@ -93,40 +93,51 @@ export class MedicinesService {
 
   async findAll(
     organizationId: string,
+    branchIds: string[],
     query: ListMedicinesDto,
   ): Promise<{ data: MedicineRecord[]; meta: { total: number; limit: number; offset: number } }> {
     const limit = query.limit ?? 20;
     const offset = query.offset ?? 0;
     const search = query.q?.trim();
 
-    const medicines = await this.prisma.product.findMany({
-      where: {
-        organizationId,
-        ...(query.active !== undefined ? { active: query.active } : {}),
-        ...(search
-          ? {
-              OR: [
-                { name: { contains: search, mode: 'insensitive' } },
-                { brand: { contains: search, mode: 'insensitive' } },
-                { strength: { contains: search, mode: 'insensitive' } },
-                { dosageForm: { contains: search, mode: 'insensitive' } },
-                { barcode: { contains: search.toUpperCase(), mode: 'insensitive' } },
-                { normalizedName: { contains: search.toLowerCase(), mode: 'insensitive' } },
-              ],
-            }
-          : {}),
-      },
-      orderBy: { updatedAt: 'desc' },
-      take: limit,
-      skip: offset,
-    });
+    const where = {
+      organizationId,
+      ...(query.active !== undefined ? { active: query.active } : {}),
+      ...(search
+        ? {
+            OR: [
+              { name: { contains: search, mode: 'insensitive' as const } },
+              { brand: { contains: search, mode: 'insensitive' as const } },
+              { strength: { contains: search, mode: 'insensitive' as const } },
+              { dosageForm: { contains: search, mode: 'insensitive' as const } },
+              { barcode: { contains: search.toUpperCase(), mode: 'insensitive' as const } },
+              { normalizedName: { contains: search.toLowerCase(), mode: 'insensitive' as const } },
+            ],
+          }
+        : {}),
+    };
 
-    const total = await this.prisma.product.count({ where: { organizationId } });
+    // The count has to use the same filter as the page, otherwise a search
+    // reports the size of the whole catalogue.
+    const [medicines, total] = await Promise.all([
+      this.prisma.product.findMany({
+        where,
+        orderBy: { updatedAt: 'desc' },
+        take: limit,
+        skip: offset,
+      }),
+      this.prisma.product.count({ where }),
+    ]);
 
     const medicineIds = medicines.map((medicine) => medicine.id);
     const balances = medicineIds.length
       ? await this.prisma.batchBalance.findMany({
-          where: { organizationId, batch: { productId: { in: medicineIds } } },
+          where: {
+            organizationId,
+            // The catalogue is shared but quantities are per branch, so the
+            // list never adds another location's stock to the column shown.
+            batch: { productId: { in: medicineIds }, branchId: { in: branchIds } },
+          },
           select: { batch: { select: { productId: true } }, quantity: true },
         })
       : [];
@@ -161,20 +172,22 @@ export class MedicinesService {
     return { data: items, meta: { total, limit, offset } };
   }
 
-  async findOne(organizationId: string, id: string): Promise<MedicineRecord> {
+  async findOne(organizationId: string, branchIds: string[], id: string): Promise<MedicineRecord> {
     const medicine = await this.prisma.product.findFirst({ where: { id, organizationId } });
     if (!medicine) {
       throw new NotFoundException({ code: 'NOT_FOUND', message: 'Medicine not found' });
     }
-    const balance = await this.prisma.batchBalance.findFirst({
-      where: { organizationId, batch: { productId: medicine.id } },
-      select: { quantity: true },
-    });
+    const quantity = await this.stockInBranches(organizationId, branchIds, medicine.id);
 
-    return this.toRecord(medicine, balance ? this.toQuantity(balance.quantity) : 0);
+    return this.toRecord(medicine, quantity);
   }
 
-  async update(organizationId: string, id: string, dto: UpdateMedicineDto): Promise<MedicineRecord> {
+  async update(
+    organizationId: string,
+    branchIds: string[],
+    id: string,
+    dto: UpdateMedicineDto,
+  ): Promise<MedicineRecord> {
     const existing = await this.prisma.product.findFirst({ where: { id, organizationId } });
     if (!existing) {
       throw new NotFoundException({ code: 'NOT_FOUND', message: 'Medicine not found' });
@@ -209,12 +222,22 @@ export class MedicinesService {
       },
     });
 
-    const balance = await this.prisma.batchBalance.findFirst({
-      where: { organizationId, batch: { productId: updated.id } },
+    const quantity = await this.stockInBranches(organizationId, branchIds, updated.id);
+
+    return this.toRecord(updated, quantity);
+  }
+
+  /** Stock of one medicine across the branches the caller may read. */
+  private async stockInBranches(
+    organizationId: string,
+    branchIds: string[],
+    productId: string,
+  ): Promise<number> {
+    const balances = await this.prisma.batchBalance.findMany({
+      where: { organizationId, batch: { productId, branchId: { in: branchIds } } },
       select: { quantity: true },
     });
-
-    return this.toRecord(updated, balance ? this.toQuantity(balance.quantity) : 0);
+    return balances.reduce((total, balance) => total + this.toQuantity(balance.quantity), 0);
   }
 
   private toRecord(medicine: MedicineRow, totalRecordedQuantity: number): MedicineRecord {

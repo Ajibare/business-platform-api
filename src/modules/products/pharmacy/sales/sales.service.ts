@@ -49,6 +49,7 @@ export interface SaleLineRecord {
 export interface SaleRecord {
   id: string;
   organizationId: string;
+  branchId: string;
   reference: string;
   status: string;
   occurredAt: Date;
@@ -75,20 +76,23 @@ export class SalesService {
   ) {}
 
   /**
-   * Records a sale and deducts stock at batch level using FEFO.
+   * Records a sale in one branch and deducts stock at batch level using FEFO.
    *
-   * The sale row, the balance decrements and the ISSUE movements are written in
-   * one transaction. Decrements are conditional (`quantity >= take`) so a
-   * concurrent sale can never drive a batch negative, and the per-batch
-   * movement idempotency key means a retried request cannot deduct twice.
+   * Only batches belonging to `branchId` are considered, so a sale can never
+   * take stock from another location. The sale row, the balance decrements and
+   * the ISSUE movements are written in one transaction. Decrements are
+   * conditional (`quantity >= take`) so a concurrent sale can never drive a
+   * batch negative, and the per-batch movement idempotency key means a retried
+   * request cannot deduct twice.
    */
   async create(
     organizationId: string,
+    branchId: string,
     actorId: string,
     dto: CreateSaleDto,
   ): Promise<{ data: SaleRecord }> {
     const idempotencyKey = dto.idempotencyKey?.trim() || `sale-${randomUUID()}`;
-    const replay = await this.findByKey(organizationId, idempotencyKey);
+    const replay = await this.findByKey(organizationId, branchId, idempotencyKey);
     if (replay) return { data: this.toRecord(replay) };
 
     const organization = await this.prisma.organization.findUnique({
@@ -114,7 +118,7 @@ export class SalesService {
     }
 
     const batches = await this.prisma.batch.findMany({
-      where: { organizationId, productId: { in: productIds } },
+      where: { organizationId, branchId, productId: { in: productIds } },
       select: {
         id: true,
         productId: true,
@@ -214,6 +218,7 @@ export class SalesService {
           const created = await tx.sale.create({
             data: {
               organizationId,
+              branchId,
               reference,
               status: 'COMPLETED',
               occurredAt,
@@ -265,6 +270,7 @@ export class SalesService {
             await tx.stockMovement.create({
               data: {
                 organizationId,
+                branchId,
                 batchId,
                 type: 'ISSUE',
                 quantityDelta: -quantity,
@@ -285,6 +291,7 @@ export class SalesService {
 
       await this.auditService.record({
         organizationId,
+        branchId,
         actorId,
         action: 'SALE_RECORDED',
         entityType: 'Sale',
@@ -295,18 +302,18 @@ export class SalesService {
       return { data: this.toRecord(sale) };
     } catch (error) {
       if (this.isUniqueViolation(error)) {
-        const existing = await this.findByKey(organizationId, idempotencyKey);
+        const existing = await this.findByKey(organizationId, branchId, idempotencyKey);
         if (existing) return { data: this.toRecord(existing) };
       }
       throw error;
     }
   }
 
-  async findAll(organizationId: string, query: ListSalesDto) {
+  async findAll(organizationId: string, branchIds: string[], query: ListSalesDto) {
     const limit = query.limit ?? 50;
     const offset = query.offset ?? 0;
 
-    const where: Prisma.SaleWhereInput = { organizationId };
+    const where: Prisma.SaleWhereInput = { organizationId, branchId: { in: branchIds } };
     if (query.status && (query.status === 'COMPLETED' || query.status === 'VOIDED')) {
       where.status = query.status as SaleStatus;
     }
@@ -342,9 +349,9 @@ export class SalesService {
     };
   }
 
-  async findOne(organizationId: string, id: string): Promise<{ data: SaleRecord }> {
+  async findOne(organizationId: string, branchIds: string[], id: string): Promise<{ data: SaleRecord }> {
     const sale = await this.prisma.sale.findFirst({
-      where: { id, organizationId },
+      where: { id, organizationId, branchId: { in: branchIds } },
       include: SALE_INCLUDE,
     });
     if (!sale) {
@@ -357,9 +364,14 @@ export class SalesService {
    * Voids a sale and reverses every ISSUE movement it created. The sale stays
    * in the history with status VOIDED and is excluded from revenue totals.
    */
-  async void(organizationId: string, actorId: string, id: string): Promise<{ data: SaleRecord }> {
+  async void(
+    organizationId: string,
+    branchIds: string[],
+    actorId: string,
+    id: string,
+  ): Promise<{ data: SaleRecord }> {
     const sale = await this.prisma.sale.findFirst({
-      where: { id, organizationId },
+      where: { id, organizationId, branchId: { in: branchIds } },
       include: SALE_INCLUDE,
     });
     if (!sale) {
@@ -400,6 +412,7 @@ export class SalesService {
           await tx.stockMovement.create({
             data: {
               organizationId,
+              branchId: sale.branchId,
               batchId,
               type: 'REVERSAL',
               quantityDelta: quantity,
@@ -423,6 +436,7 @@ export class SalesService {
 
     await this.auditService.record({
       organizationId,
+      branchId: sale.branchId,
       actorId,
       action: 'SALE_VOIDED',
       entityType: 'Sale',
@@ -440,6 +454,7 @@ export class SalesService {
    */
   async recordReturn(
     organizationId: string,
+    branchIds: string[],
     actorId: string,
     saleId: string,
     dto: CreateSaleReturnDto,
@@ -450,11 +465,11 @@ export class SalesService {
       select: { saleId: true },
     });
     if (replay) {
-      return this.findOne(organizationId, replay.saleId);
+      return this.findOne(organizationId, branchIds, replay.saleId);
     }
 
     const sale = await this.prisma.sale.findFirst({
-      where: { id: saleId, organizationId },
+      where: { id: saleId, organizationId, branchId: { in: branchIds } },
       include: SALE_INCLUDE,
     });
     if (!sale) {
@@ -547,6 +562,7 @@ export class SalesService {
             await tx.stockMovement.create({
               data: {
                 organizationId,
+                branchId: sale.branchId,
                 batchId,
                 type: 'CUSTOMER_RETURN',
                 quantityDelta: restockQuantity,
@@ -587,13 +603,14 @@ export class SalesService {
       );
     } catch (error) {
       if (this.isUniqueViolation(error)) {
-        return this.findOne(organizationId, sale.id);
+        return this.findOne(organizationId, branchIds, sale.id);
       }
       throw error;
     }
 
     await this.auditService.record({
       organizationId,
+      branchId: sale.branchId,
       actorId,
       action: 'SALE_RETURN_RECORDED',
       entityType: 'Sale',
@@ -601,14 +618,24 @@ export class SalesService {
       metadata: { reference: sale.reference, amount, quantity },
     });
 
-    return this.findOne(organizationId, sale.id);
+    return this.findOne(organizationId, branchIds, sale.id);
   }
 
-  private findByKey(organizationId: string, idempotencyKey: string) {
-    return this.prisma.sale.findUnique({
+  /**
+   * A replay is only honoured inside the same branch. The idempotency key is
+   * unique per organisation, so the branch is checked explicitly rather than
+   * letting a key from one location replay another location's sale.
+   */
+  private async findByKey(
+    organizationId: string,
+    branchId: string,
+    idempotencyKey: string,
+  ) {
+    const sale = await this.prisma.sale.findUnique({
       where: { organizationId_idempotencyKey: { organizationId, idempotencyKey } },
       include: SALE_INCLUDE,
     });
+    return sale && sale.branchId === branchId ? sale : null;
   }
 
   private toRecord(sale: SaleWithLines): SaleRecord {
@@ -617,6 +644,7 @@ export class SalesService {
     return {
       id: sale.id,
       organizationId: sale.organizationId,
+      branchId: sale.branchId,
       reference: sale.reference,
       status: sale.status,
       occurredAt: sale.occurredAt,

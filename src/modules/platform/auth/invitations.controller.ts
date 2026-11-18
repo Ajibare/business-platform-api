@@ -10,11 +10,12 @@ import {
   Res,
   UseGuards,
 } from '@nestjs/common';
-import { Role } from '@prisma/client';
+import { CurrentActor } from '../../../common/decorators/current-actor.decorator';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
-import { Roles } from '../../../common/decorators/roles.decorator';
+import { RequirePermission } from '../../../common/decorators/require-permission.decorator';
 import { JwtAuthGuard } from '../../../common/guards/jwt-auth.guard';
-import { RolesGuard } from '../../../common/guards/roles.guard';
+import { PermissionsGuard } from '../../../common/guards/permissions.guard';
+import type { RequestActor } from '../../platform/branches/branch-access.service';
 import {
   attachRefreshCookie,
   AuthRequestLike,
@@ -29,38 +30,33 @@ export class InvitationsController {
 
   @Post()
   @HttpCode(201)
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('OWNER', 'MANAGER')
-  async create(
-    @Body() dto: CreateInvitationDto,
-    @CurrentUser('sub') userId: string,
-    @CurrentUser('organisationId') organisationId: string,
-  ) {
-    const role = await this.roleOf(userId, organisationId);
-    return this.invitations.create({ userId, organisationId, role }, dto);
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePermission('staff:manage')
+  async create(@CurrentActor() actor: RequestActor, @Body() dto: CreateInvitationDto) {
+    return this.invitations.create(this.contextOf(actor), dto);
   }
 
   @Get()
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('OWNER', 'MANAGER')
-  async list(
-    @CurrentUser('sub') userId: string,
-    @CurrentUser('organisationId') organisationId: string,
-  ) {
-    const role = await this.roleOf(userId, organisationId);
-    return this.invitations.list({ userId, organisationId, role });
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePermission('staff:read')
+  async list(@CurrentActor() actor: RequestActor) {
+    return this.invitations.list(this.contextOf(actor));
+  }
+
+  /** Sends a fresh link for a pending invitation and retires the old one. */
+  @Post(':id/resend')
+  @HttpCode(200)
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePermission('staff:manage')
+  async resend(@CurrentActor() actor: RequestActor, @Param('id') id: string) {
+    return this.invitations.resend(this.contextOf(actor), id);
   }
 
   @Delete(':id')
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('OWNER', 'MANAGER')
-  async revoke(
-    @Param('id') id: string,
-    @CurrentUser('sub') userId: string,
-    @CurrentUser('organisationId') organisationId: string,
-  ) {
-    const role = await this.roleOf(userId, organisationId);
-    return this.invitations.revoke({ userId, organisationId, role }, id);
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @RequirePermission('staff:manage')
+  async revoke(@CurrentActor() actor: RequestActor, @Param('id') id: string) {
+    return this.invitations.revoke(this.contextOf(actor), id);
   }
 
   /** Public: the invite page renders the workspace name and role before sign-in. */
@@ -98,11 +94,13 @@ export class InvitationsController {
     return { data: result.payload };
   }
 
-  /**
-   * The guard already read the membership, but the service needs the role to
-   * apply the "managers cannot invite managers" rule, so it is read explicitly.
-   */
-  private async roleOf(userId: string, organisationId: string): Promise<Role> {
-    return this.invitations.roleOf(userId, organisationId);
+  /** The service authorises by permission, so it receives the resolved actor. */
+  private contextOf(actor: RequestActor) {
+    return {
+      userId: actor.userId,
+      organisationId: actor.organizationId,
+      role: actor.role,
+      permissions: actor.permissions,
+    };
   }
 }

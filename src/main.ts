@@ -25,7 +25,9 @@ async function bootstrap() {
     origin: origins,
     credentials: true,
     methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    // `X-Branch-Id` selects which branch a request works in. It is only a hint:
+    // the API checks it against the caller's branch access before using it.
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Branch-Id'],
   });
 
   await app.listen(process.env.PORT ?? 3001);

@@ -53,6 +53,7 @@ export class BulkMedicinesService {
 
   async createMany(
     organizationId: string,
+    branchId: string,
     actorId: string,
     dto: BulkCreateMedicinesDto,
   ): Promise<BulkMedicineResult> {
@@ -93,6 +94,7 @@ export class BulkMedicinesService {
       try {
         const result = await this.createRow({
           organizationId,
+          branchId,
           actorId,
           row,
           rowNumber,
@@ -140,6 +142,7 @@ export class BulkMedicinesService {
 
     await this.auditService.record({
       organizationId,
+      branchId,
       actorId,
       action: 'MEDICINES_BULK_CREATED',
       entityType: 'Product',
@@ -163,6 +166,7 @@ export class BulkMedicinesService {
 
   private async createRow(input: {
     organizationId: string;
+    branchId: string;
     actorId: string;
     row: BulkMedicineRowDto;
     rowNumber: number;
@@ -241,6 +245,7 @@ export class BulkMedicinesService {
 
       const batchData = {
         organizationId,
+        branchId: input.branchId,
         productId: product.id,
         batchNumber: row.batchNumber?.trim() || null,
         expiryDate,
@@ -254,6 +259,7 @@ export class BulkMedicinesService {
         const receipt = await tx.stockReceipt.create({
           data: {
             organizationId,
+            branchId: input.branchId,
             supplierId: row.supplierId,
             externalReference: 'Bulk medicine creation',
             status: 'DRAFT',
@@ -277,6 +283,7 @@ export class BulkMedicinesService {
         const batch = await tx.batch.create({ data: batchData, select: { id: true } });
         await this.recordOpeningStock(tx, {
           organizationId,
+          branchId: input.branchId,
           actorId,
           batchId: batch.id,
           quantity,
@@ -297,6 +304,7 @@ export class BulkMedicinesService {
       const batch = await tx.batch.create({ data: batchData, select: { id: true } });
       await this.recordOpeningStock(tx, {
         organizationId,
+        branchId: input.branchId,
         actorId,
         batchId: batch.id,
         quantity,
@@ -330,6 +338,7 @@ export class BulkMedicinesService {
     tx: PrismaTransaction,
     input: {
       organizationId: string;
+      branchId: string;
       actorId: string;
       batchId: string;
       quantity: number;
@@ -341,6 +350,7 @@ export class BulkMedicinesService {
     await tx.stockMovement.create({
       data: {
         organizationId: input.organizationId,
+        branchId: input.branchId,
         batchId: input.batchId,
         type: input.type,
         quantityDelta: input.quantity,

@@ -54,7 +54,7 @@ describe('ReceiptsService', () => {
       ],
     });
 
-    const result = await service.create('org-1', 'user-1', {
+    const result = await service.create('org-1', 'branch-1', 'user-1', {
       lines: [{ productId: 'prod-1', batchNumber: 'B-1', quantity: 100, unitCost: 12.5 }],
     });
 
@@ -68,7 +68,7 @@ describe('ReceiptsService', () => {
     prismaMock.product.findFirst.mockResolvedValue(null);
 
     await expect(
-      service.create('org-1', 'user-1', { lines: [{ productId: 'missing', quantity: 10 }] }),
+      service.create('org-1', 'branch-1', 'user-1', { lines: [{ productId: 'missing', quantity: 10 }] }),
     ).rejects.toThrow(NotFoundException);
   });
 
@@ -127,7 +127,7 @@ describe('ReceiptsService', () => {
       return callback(tx);
     });
 
-    const result = await service.confirm('org-1', 'receipt-1', 'user-1');
+    const result = await service.confirm('org-1', ['branch-1'], 'receipt-1', 'user-1');
 
     expect(result.status).toBe('CONFIRMED');
     expect(prismaMock.$transaction).toHaveBeenCalled();
@@ -136,12 +136,16 @@ describe('ReceiptsService', () => {
   it('rejects confirming a non-draft receipt', async () => {
     prismaMock.stockReceipt.findFirst.mockResolvedValue({ id: 'receipt-1', status: 'CONFIRMED', lines: [] });
 
-    await expect(service.confirm('org-1', 'receipt-1', 'user-1')).rejects.toThrow(BadRequestException);
+    await expect(service.confirm('org-1', ['branch-1'], 'receipt-1', 'user-1')).rejects.toThrow(
+      BadRequestException,
+    );
   });
 
   it('rejects confirming an unknown receipt', async () => {
     prismaMock.stockReceipt.findFirst.mockResolvedValue(null);
 
-    await expect(service.confirm('org-1', 'missing', 'user-1')).rejects.toThrow(NotFoundException);
+    await expect(service.confirm('org-1', ['branch-1'], 'missing', 'user-1')).rejects.toThrow(
+      NotFoundException,
+    );
   });
 });

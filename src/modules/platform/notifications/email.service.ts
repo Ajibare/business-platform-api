@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from '../../../database/prisma.service';
 
 const MAX_ATTEMPTS = Number(process.env.EMAIL_MAX_ATTEMPTS ?? 5);
@@ -20,12 +20,27 @@ interface OutboundEmail {
  *   Credentials are read from the environment and never stored in source code.
  */
 @Injectable()
-export class EmailService {
+export class EmailService implements OnModuleInit {
   private readonly logger = new Logger(EmailService.name);
   private readonly transport = process.env.EMAIL_TRANSPORT === 'http' ? 'http' : 'log';
   private readonly from = process.env.EMAIL_FROM ?? 'notifications@pharmacy.local';
 
   constructor(private readonly prisma: PrismaService) {}
+
+  /**
+   * States which transport is live at boot. Configuration is read once per
+   * process, so without this line a `.env` edit that has not been reloaded looks
+   * identical to one that was applied.
+   */
+  onModuleInit(): void {
+    if (this.transport === 'log') {
+      this.logger.log(`Email transport: log - nothing is delivered. from=${this.from}`);
+      return;
+    }
+    this.logger.log(
+      `Email transport: http - delivering via ${process.env.EMAIL_HTTP_URL ?? '(unset)'} from ${this.from}`,
+    );
+  }
 
   get activeTransport(): 'log' | 'http' {
     return this.transport;
@@ -246,8 +261,16 @@ export class EmailService {
 
   private async send(message: OutboundEmail): Promise<void> {
     if (this.transport === 'log') {
+      // The body carries the secret (verification code, reset token), so it is
+      // only written outside production. Omitting it entirely - as this used to
+      // - made a missing email impossible to diagnose: nothing was delivered and
+      // nothing recorded what should have been.
+      const body =
+        process.env.NODE_ENV === 'production'
+          ? '(nothing is delivered by this transport; set EMAIL_TRANSPORT=http)'
+          : message.text;
       this.logger.log(
-        `[email:log] to=${message.to} from=${this.from} subject="${message.subject}"`,
+        `[email:log] to=${message.to} from=${this.from} subject="${message.subject}"\n${body}`,
       );
       return;
     }

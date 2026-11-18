@@ -18,6 +18,7 @@ export interface StockCountLineRecord {
 export interface StockCountRecord {
   id: string;
   organizationId: string;
+  branchId: string;
   status: string;
   scope: string;
   startedAt: Date;
@@ -31,10 +32,17 @@ export interface StockCountRecord {
 export class CountsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async create(organizationId: string, actorId: string, dto: CreateCountDto): Promise<StockCountRecord> {
+  /** A count always covers exactly one branch's shelves. */
+  async create(
+    organizationId: string,
+    branchId: string,
+    actorId: string,
+    dto: CreateCountDto,
+  ): Promise<StockCountRecord> {
     const count = await this.prisma.stockCount.create({
       data: {
         organizationId,
+        branchId,
         status: 'DRAFT',
         scope: dto.scope,
         counterId: actorId,
@@ -46,6 +54,7 @@ export class CountsService {
     const batches = await this.prisma.batch.findMany({
       where: {
         organizationId,
+        branchId,
         ...(dto.scope === 'TARGETED' && dto.productIds?.length
           ? { productId: { in: dto.productIds } }
           : {}),
@@ -80,10 +89,13 @@ export class CountsService {
 
   async addLine(
     organizationId: string,
+    branchIds: string[],
     countId: string,
     dto: AddCountLineDto,
   ): Promise<StockCountLineRecord> {
-    const count = await this.prisma.stockCount.findFirst({ where: { id: countId, organizationId } });
+    const count = await this.prisma.stockCount.findFirst({
+      where: { id: countId, organizationId, branchId: { in: branchIds } },
+    });
     if (!count) {
       throw new NotFoundException({ code: 'NOT_FOUND', message: 'Stock count not found' });
     }
@@ -95,7 +107,9 @@ export class CountsService {
     }
 
     const batch = dto.batchId
-      ? await this.prisma.batch.findFirst({ where: { id: dto.batchId, organizationId } })
+      ? await this.prisma.batch.findFirst({
+          where: { id: dto.batchId, organizationId, branchId: count.branchId },
+        })
       : null;
 
     const existing = batch
@@ -143,8 +157,10 @@ export class CountsService {
     };
   }
 
-  async submit(organizationId: string, id: string): Promise<StockCountRecord> {
-    const count = await this.prisma.stockCount.findFirst({ where: { id, organizationId } });
+  async submit(organizationId: string, branchIds: string[], id: string): Promise<StockCountRecord> {
+    const count = await this.prisma.stockCount.findFirst({
+      where: { id, organizationId, branchId: { in: branchIds } },
+    });
     if (!count) {
       throw new NotFoundException({ code: 'NOT_FOUND', message: 'Stock count not found' });
     }
@@ -164,9 +180,14 @@ export class CountsService {
     return this.toRecord(updated as never, organizationId);
   }
 
-  async approve(organizationId: string, id: string, approverId: string): Promise<StockCountRecord> {
+  async approve(
+    organizationId: string,
+    branchIds: string[],
+    id: string,
+    approverId: string,
+  ): Promise<StockCountRecord> {
     const count = await this.prisma.stockCount.findFirst({
-      where: { id, organizationId },
+      where: { id, organizationId, branchId: { in: branchIds } },
       include: { lines: true },
     });
     if (!count) {
@@ -186,6 +207,7 @@ export class CountsService {
       await this.prisma.stockMovement.create({
         data: {
           organizationId,
+          branchId: count.branchId,
           batchId: line.batchId as string,
           type: 'ADJUSTMENT',
           quantityDelta: variance,
@@ -219,6 +241,7 @@ export class CountsService {
     const record = count as unknown as {
       id: string;
       organizationId: string;
+      branchId: string;
       status: string;
       scope: string;
       startedAt: Date;
@@ -230,6 +253,7 @@ export class CountsService {
     return {
       id: record.id,
       organizationId: record.organizationId,
+      branchId: record.branchId,
       status: record.status,
       scope: record.scope,
       startedAt: record.startedAt,

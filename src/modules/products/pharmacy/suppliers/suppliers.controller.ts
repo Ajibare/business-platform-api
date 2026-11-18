@@ -3,48 +3,51 @@ import { SuppliersService } from './suppliers.service';
 import { CreateSupplierDto } from './dto/create-supplier.dto';
 import { UpdateSupplierDto } from './dto/update-supplier.dto';
 import { ListSuppliersDto } from './dto/list-suppliers.dto';
-import { CurrentUser } from '../../../../common/decorators/current-user.decorator';
+import { CurrentActor } from '../../../../common/decorators/current-actor.decorator';
+import { RequirePermission } from '../../../../common/decorators/require-permission.decorator';
 import { JwtAuthGuard } from '../../../../common/guards/jwt-auth.guard';
-import { RolesGuard } from '../../../../common/guards/roles.guard';
-import { Roles } from '../../../../common/decorators/roles.decorator';
-import { Role } from '@prisma/client';
+import { PermissionsGuard } from '../../../../common/guards/permissions.guard';
+import type { RequestActor } from '../../../platform/branches/branch-access.service';
 
+/** Suppliers belong to the organisation, so these endpoints are not branch-scoped. */
 @Controller('pharmacy/suppliers')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard)
 export class SuppliersController {
   constructor(private readonly suppliersService: SuppliersService) {}
 
   @Get()
+  @RequirePermission('supplier:read')
   findAll(
-    @CurrentUser('organisationId') organizationId: string,
+    @CurrentActor() actor: RequestActor,
     @Query() query: ListSuppliersDto,
   ) {
-    return this.suppliersService.findAll(organizationId, query);
+    return this.suppliersService.findAll(actor.organizationId, query);
   }
 
   @Post()
-  @Roles(Role.OWNER, Role.MANAGER)
+  @RequirePermission('supplier:manage')
   async create(
-    @CurrentUser('organisationId') organizationId: string,
+    @CurrentActor() actor: RequestActor,
     @Body() dto: CreateSupplierDto,
   ) {
-    const supplier = await this.suppliersService.create(organizationId, dto);
+    const supplier = await this.suppliersService.create(actor.organizationId, dto);
     return { data: supplier };
   }
 
   @Get(':id')
-  findOne(@CurrentUser('organisationId') organizationId: string, @Param('id') id: string) {
-    return this.suppliersService.findOne(organizationId, id);
+  @RequirePermission('supplier:read')
+  findOne(@CurrentActor() actor: RequestActor, @Param('id') id: string) {
+    return this.suppliersService.findOne(actor.organizationId, id);
   }
 
   @Patch(':id')
-  @Roles(Role.OWNER, Role.MANAGER)
+  @RequirePermission('supplier:manage')
   async update(
-    @CurrentUser('organisationId') organizationId: string,
+    @CurrentActor() actor: RequestActor,
     @Param('id') id: string,
     @Body() dto: UpdateSupplierDto,
   ) {
-    const supplier = await this.suppliersService.update(organizationId, id, dto);
+    const supplier = await this.suppliersService.update(actor.organizationId, id, dto);
     return { data: supplier };
   }
 }

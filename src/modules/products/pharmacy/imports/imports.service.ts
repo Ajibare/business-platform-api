@@ -157,6 +157,7 @@ export class ImportsService {
   async validateAndStore(
     organizationId: string,
     actorId: string,
+    branchId: string,
     dto: CreateImportDto,
   ) {
     const type = this.assertType(dto.type);
@@ -219,6 +220,7 @@ export class ImportsService {
       const failedJob = await this.prisma.importJob.create({
         data: {
           organizationId,
+          branchId,
           type,
           filename: dto.filename,
           status: 'FAILED',
@@ -268,6 +270,7 @@ export class ImportsService {
     const job = await this.prisma.importJob.create({
       data: {
         organizationId,
+        branchId,
         type,
         filename: dto.filename,
         status: 'VALIDATED',
@@ -332,7 +335,7 @@ export class ImportsService {
     };
   }
 
-  async confirm(organizationId: string, actorId: string, id: string) {
+  async confirm(organizationId: string, actorId: string, branchId: string, id: string) {
     const job = await this.prisma.importJob.findFirst({
       where: { id, organizationId },
       include: { rows: { orderBy: { rowNumber: 'asc' } } },
@@ -362,7 +365,14 @@ export class ImportsService {
 
       const stored = row.data as unknown as StoredRowData;
       try {
-        const entity = await this.importRow(organizationId, job.id, type, row.rowNumber, stored.normalized);
+        const entity = await this.importRow(
+          organizationId,
+          job.branchId ?? branchId,
+          job.id,
+          type,
+          row.rowNumber,
+          stored.normalized,
+        );
         imported += 1;
         await this.prisma.importJobRow.update({
           where: { id: row.id },
@@ -503,6 +513,7 @@ export class ImportsService {
 
   private async importRow(
     organizationId: string,
+    branchId: string,
     jobId: string,
     type: ImportType,
     rowNumber: number,
@@ -573,6 +584,7 @@ export class ImportsService {
       const batch = await tx.batch.create({
         data: {
           organizationId,
+          branchId,
           productId: product.id,
           batchNumber: (normalized.batchNumber as string | null) ?? null,
           expiryDate,
@@ -586,6 +598,7 @@ export class ImportsService {
       await tx.stockMovement.create({
         data: {
           organizationId,
+          branchId,
           batchId: batch.id,
           type: 'OPENING',
           quantityDelta: quantity,

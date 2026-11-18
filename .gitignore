@@ -3,5 +3,10 @@ dist
 coverage
 .env
 .env.local
+# Every environment file except the placeholder template.
+.env.*
+!.env.example
+# Database backups and dumps must never be committed.
+backups/
 *.log
 .DS_Store

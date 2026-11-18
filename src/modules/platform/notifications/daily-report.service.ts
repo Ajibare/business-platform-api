@@ -18,6 +18,9 @@ import {
 
 export interface DailyReport {
   organizationId: string;
+  /** Null for the consolidated organisation report. */
+  branchId: string | null;
+  branchName: string | null;
   pharmacyName: string;
   date: string;
   timeZone: string;
@@ -49,13 +52,28 @@ export interface DailyReportSendResult {
   emailsFailed: number;
 }
 
+/** One send can produce several reports when the workspace reports per branch. */
+export interface DailyReportBatchResult {
+  scope: 'consolidated' | 'per-branch';
+  reports: DailyReport[];
+  results: DailyReportSendResult[];
+  totals: {
+    reportsCreated: number;
+    alreadySent: number;
+    emailsQueued: number;
+    emailsSent: number;
+    emailsFailed: number;
+  };
+}
+
 /**
  * Builds and delivers the daily sales summary.
  *
  * Figures come from completed sales only, refunds are counted on the day they
  * were given, and the business day is resolved in the reporting timezone. A
  * unique `(organizationId, dedupeKey)` notification prevents duplicate reports
- * for the same date even when several schedulers run at once.
+ * for the same date even when several schedulers run at once; when the workspace
+ * reports per branch the branch id is part of that key.
  */
 @Injectable()
 export class DailyReportService {
@@ -70,7 +88,11 @@ export class DailyReportService {
     private readonly auditService: AuditService,
   ) {}
 
-  async buildReport(organizationId: string, requestedDate?: string): Promise<DailyReport> {
+  async buildReport(
+    organizationId: string,
+    requestedDate?: string,
+    branchId: string | null = null,
+  ): Promise<DailyReport> {
     const organization = await this.prisma.organization.findUnique({
       where: { id: organizationId },
       select: { name: true, timezone: true, currency: true },
@@ -86,10 +108,22 @@ export class DailyReportService {
         ? requestedDate
         : localDateKey(new Date(), timeZone);
     const { start, end } = zonedDayRangeUtc(date, timeZone);
+    const scope = branchId ? { branchId } : {};
 
-    const [sales, returns, existing, recipients] = await Promise.all([
+    const [branch, sales, returns, existing, recipients] = await Promise.all([
+      branchId
+        ? this.prisma.branch.findFirst({
+            where: { id: branchId, organizationId },
+            select: { name: true },
+          })
+        : Promise.resolve(null),
       this.prisma.sale.findMany({
-        where: { organizationId, status: 'COMPLETED', occurredAt: { gte: start, lt: end } },
+        where: {
+          organizationId,
+          ...scope,
+          status: 'COMPLETED',
+          occurredAt: { gte: start, lt: end },
+        },
         select: {
           subtotal: true,
           discountTotal: true,
@@ -99,20 +133,28 @@ export class DailyReportService {
         },
       }),
       this.prisma.saleReturn.findMany({
-        where: { organizationId, occurredAt: { gte: start, lt: end } },
+        where: {
+          organizationId,
+          occurredAt: { gte: start, lt: end },
+          ...(branchId ? { sale: { branchId } } : {}),
+        },
         select: { amount: true },
       }),
       this.prisma.notification.findUnique({
         where: {
           organizationId_dedupeKey: {
             organizationId,
-            dedupeKey: dailyReportDedupeKey(date),
+            dedupeKey: dailyReportDedupeKey(date, branchId),
           },
         },
         select: { id: true },
       }),
-      this.resolveRecipients(organizationId),
+      this.resolveRecipients(organizationId, branchId),
     ]);
+
+    if (branchId && !branch) {
+      throw new NotFoundException({ code: 'NOT_FOUND', message: 'Branch not found' });
+    }
 
     const summary = summariseSalesDay(
       sales.map((sale) => ({
@@ -127,6 +169,8 @@ export class DailyReportService {
 
     return {
       organizationId,
+      branchId,
+      branchName: branch?.name ?? null,
       pharmacyName: organization.name,
       date,
       timeZone,
@@ -139,7 +183,28 @@ export class DailyReportService {
   }
 
   /**
-   * Sends the report for a workspace. Scheduled runs only send when the local
+   * Every report this workspace should produce for a date: one consolidated
+   * report, or one per active branch when that preference is on.
+   */
+  async buildReports(organizationId: string, requestedDate?: string): Promise<DailyReport[]> {
+    const preferences = await this.notifications.getPreferences(organizationId);
+    if (!preferences.dailyReportPerBranch) {
+      return [await this.buildReport(organizationId, requestedDate, null)];
+    }
+
+    const branches = await this.prisma.branch.findMany({
+      where: { organizationId, status: 'ACTIVE' },
+      select: { id: true },
+      orderBy: [{ isDefault: 'desc' }, { name: 'asc' }],
+    });
+
+    return Promise.all(
+      branches.map((branch) => this.buildReport(organizationId, requestedDate, branch.id)),
+    );
+  }
+
+  /**
+   * Sends the report(s) for a workspace. Scheduled runs only send when the local
    * delivery time has passed and daily reports are enabled; a manual run from
    * the settings screen ignores the clock but still respects deduplication.
    */
@@ -147,7 +212,7 @@ export class DailyReportService {
     organizationId: string,
     actorId: string | null,
     options: { date?: string; mode: 'scheduled' | 'manual' } = { mode: 'scheduled' },
-  ): Promise<DailyReportSendResult> {
+  ): Promise<DailyReportBatchResult> {
     const preferences = await this.notifications.getPreferences(organizationId);
     const organization = await this.prisma.organization.findUnique({
       where: { id: organizationId },
@@ -155,10 +220,29 @@ export class DailyReportService {
     });
     const timeZone =
       preferences.dailyReportTimezone || organization?.timezone || 'Africa/Lagos';
+    const scope: DailyReportBatchResult['scope'] = preferences.dailyReportPerBranch
+      ? 'per-branch'
+      : 'consolidated';
+
+    const skippedBatch = async (reason: string): Promise<DailyReportBatchResult> => {
+      const reports = await this.buildReports(organizationId, options.date);
+      return {
+        scope,
+        reports,
+        results: reports.map((report) => this.skipped(report, reason)),
+        totals: {
+          reportsCreated: 0,
+          alreadySent: 0,
+          emailsQueued: 0,
+          emailsSent: 0,
+          emailsFailed: 0,
+        },
+      };
+    };
 
     if (options.mode === 'scheduled') {
       if (!preferences.dailyReportEnabled || !preferences.emailEnabled) {
-        return this.skipped(await this.buildReport(organizationId, options.date), 'disabled');
+        return skippedBatch('disabled');
       }
       if (
         !isDailyReportDue({
@@ -167,93 +251,46 @@ export class DailyReportService {
           timeZone,
         })
       ) {
-        return this.skipped(await this.buildReport(organizationId, options.date), 'not-due');
+        return skippedBatch('not-due');
       }
     }
 
-    const report = await this.buildReport(organizationId, options.date);
-    if (report.alreadySent) {
-      return {
-        report,
-        skipped: true,
-        reason: 'already-sent',
-        notificationId: null,
-        emailsQueued: 0,
-        emailsSent: 0,
-        emailsFailed: 0,
-      };
+    const reports = await this.buildReports(organizationId, options.date);
+    const results: DailyReportSendResult[] = [];
+    for (const report of reports) {
+      results.push(await this.deliver(organizationId, actorId, options.mode, report));
     }
 
-    const copy = buildDailyReportCopy({
-      organizationName: report.pharmacyName,
-      currency: report.currency,
-      date: report.date,
-      timeZone: report.timeZone,
-      summary: report.summary,
-      dashboardUrl: `${this.webUrl.replace(/\/+$/, '')}/products/pharmacy/reports`,
-    });
+    const batch: DailyReportBatchResult = {
+      scope,
+      reports,
+      results,
+      totals: {
+        reportsCreated: results.filter((result) => !result.skipped).length,
+        alreadySent: results.filter((result) => result.reason === 'already-sent').length,
+        emailsQueued: results.reduce((total, result) => total + result.emailsQueued, 0),
+        emailsSent: results.reduce((total, result) => total + result.emailsSent, 0),
+        emailsFailed: results.reduce((total, result) => total + result.emailsFailed, 0),
+      },
+    };
 
-    let notificationId: string;
-    try {
-      const notification = await this.prisma.notification.create({
-        data: {
-          organizationId,
-          type: DAILY_REPORT_NOTIFICATION_TYPE,
-          title: copy.title,
-          body: copy.body,
-          severity: 'info',
-          dedupeKey: dailyReportDedupeKey(report.date),
-          metadata: {
-            date: report.date,
-            timeZone: report.timeZone,
-            currency: report.currency,
-            ...report.summary,
-          },
-        },
-        select: { id: true },
-      });
-      notificationId = notification.id;
-    } catch (error) {
-      if (this.isUniqueViolation(error)) {
-        return {
-          report: { ...report, alreadySent: true },
-          skipped: true,
-          reason: 'already-sent',
-          notificationId: null,
-          emailsQueued: 0,
-          emailsSent: 0,
-          emailsFailed: 0,
-        };
-      }
-      throw error;
-    }
-
-    const emailsQueued = await this.email.queueForNotification(
-      organizationId,
-      notificationId,
-      report.recipients,
-    );
-    const outcome = await this.email.sendPendingForNotification(notificationId);
-
-    if (options.mode === 'manual' && actorId) {
+    if (options.mode === 'manual' && actorId && batch.totals.reportsCreated > 0) {
       await this.auditService.record({
         organizationId,
         actorId,
         action: 'DAILY_SALES_REPORT_SENT',
         entityType: 'Notification',
-        entityId: notificationId,
-        metadata: { date: report.date, recipients: report.recipients.length },
+        entityId: batch.reports[0]?.date ?? '',
+        metadata: {
+          scope: batch.scope,
+          date: batch.results[0]?.report.date ?? null,
+          reports: batch.totals.reportsCreated,
+          recipients: reports.reduce((total, report) => total + report.recipients.length, 0),
+        },
       });
     }
 
-    return {
-      report,
-      skipped: false,
-      notificationId,
-      emailsQueued,
-      emailsSent: outcome.sent,
-      emailsFailed: outcome.failed,
-    };
+    return batch;
   }
 
   /**
@@ -294,16 +331,11 @@ export class DailyReportService {
 
       summary.organizationsDue += 1;
       const result = await this.send(organization.id, null, { mode: 'scheduled' });
-      if (result.reason === 'already-sent') {
-        summary.alreadySent += 1;
-        continue;
-      }
-      if (result.skipped) continue;
-
-      summary.reportsCreated += 1;
-      summary.emailsQueued += result.emailsQueued;
-      summary.emailsSent += result.emailsSent;
-      summary.emailsFailed += result.emailsFailed;
+      summary.reportsCreated += result.totals.reportsCreated;
+      summary.alreadySent += result.totals.alreadySent;
+      summary.emailsQueued += result.totals.emailsQueued;
+      summary.emailsSent += result.totals.emailsSent;
+      summary.emailsFailed += result.totals.emailsFailed;
     }
 
     if (summary.reportsCreated > 0 || summary.emailsFailed > 0) {
@@ -324,31 +356,142 @@ export class DailyReportService {
     return this.send(organizationId, actorId, { date, mode: 'manual' });
   }
 
+  /** Creates the notification for one report and queues its emails. */
+  private async deliver(
+    organizationId: string,
+    actorId: string | null,
+    mode: 'scheduled' | 'manual',
+    report: DailyReport,
+  ): Promise<DailyReportSendResult> {
+    if (report.alreadySent) {
+      return {
+        report,
+        skipped: true,
+        reason: 'already-sent',
+        notificationId: null,
+        emailsQueued: 0,
+        emailsSent: 0,
+        emailsFailed: 0,
+      };
+    }
+
+    const copy = buildDailyReportCopy({
+      organizationName: report.pharmacyName,
+      branchName: report.branchName,
+      currency: report.currency,
+      date: report.date,
+      timeZone: report.timeZone,
+      summary: report.summary,
+      dashboardUrl: `${this.webUrl.replace(/\/+$/, '')}/products/pharmacy/reports`,
+    });
+
+    let notificationId: string;
+    try {
+      const notification = await this.prisma.notification.create({
+        data: {
+          organizationId,
+          branchId: report.branchId,
+          type: DAILY_REPORT_NOTIFICATION_TYPE,
+          title: copy.title,
+          body: copy.body,
+          severity: 'info',
+          dedupeKey: dailyReportDedupeKey(report.date, report.branchId),
+          metadata: {
+            date: report.date,
+            timeZone: report.timeZone,
+            currency: report.currency,
+            branchId: report.branchId,
+            ...report.summary,
+          },
+        },
+        select: { id: true },
+      });
+      notificationId = notification.id;
+    } catch (error) {
+      if (this.isUniqueViolation(error)) {
+        return {
+          report: { ...report, alreadySent: true },
+          skipped: true,
+          reason: 'already-sent',
+          notificationId: null,
+          emailsQueued: 0,
+          emailsSent: 0,
+          emailsFailed: 0,
+        };
+      }
+      throw error;
+    }
+
+    const emailsQueued = await this.email.queueForNotification(
+      organizationId,
+      notificationId,
+      report.recipients,
+    );
+    const outcome = await this.email.sendPendingForNotification(notificationId);
+
+    return {
+      report,
+      skipped: false,
+      notificationId,
+      emailsQueued,
+      emailsSent: outcome.sent,
+      emailsFailed: outcome.failed,
+    };
+  }
+
   /**
-   * Recipients are configured sales recipients plus the active owners and
-   * managers of the workspace, because the daily report is an owner level
-   * summary. Addresses are de-duplicated case-insensitively.
+   * Recipients are the configured sales recipients plus the staff who are
+   * responsible for the scope: owners and admins for the organisation report,
+   * and the branch manager when the report covers one branch. Addresses are
+   * de-duplicated case-insensitively so nobody receives the same email twice.
    */
-  private async resolveRecipients(organizationId: string): Promise<string[]> {
+  private async resolveRecipients(
+    organizationId: string,
+    branchId: string | null,
+  ): Promise<string[]> {
     const [configured, staff] = await Promise.all([
-      this.notifications.activeRecipients(organizationId, 'sales'),
+      this.notifications.activeRecipients(organizationId, 'sales', branchId),
       this.prisma.membership.findMany({
         where: {
           organizationId,
           active: true,
-          role: { in: ['OWNER', 'MANAGER'] },
+          role: branchId
+            ? { in: ['OWNER', 'ADMIN', 'BRANCH_MANAGER', 'MANAGER'] }
+            : { in: ['OWNER', 'ADMIN', 'MANAGER'] },
           user: { status: 'ACTIVE', email: { not: null } },
         },
-        select: { user: { select: { email: true } } },
+        select: { role: true, user: { select: { email: true } } },
       }),
     ]);
+
+    // For a branch report only the manager of that branch is added; owners and
+    // admins are organisation level and always receive every branch report.
+    const managers = branchId
+      ? await this.prisma.branch.findMany({
+          where: { id: branchId, organizationId, managerUserId: { not: null } },
+          select: { manager: { select: { email: true, status: true } } },
+        })
+      : [];
 
     const emails = new Set<string>();
     for (const recipient of configured) {
       emails.add(recipient.email.trim().toLowerCase());
     }
     for (const membership of staff) {
+      if (!branchId) {
+        const email = membership.user.email?.trim().toLowerCase();
+        if (email) emails.add(email);
+        continue;
+      }
+      // Organisation owners and admins see every branch; a branch manager only
+      // receives the report of a branch they manage.
+      if (membership.role !== 'OWNER' && membership.role !== 'ADMIN') continue;
       const email = membership.user.email?.trim().toLowerCase();
+      if (email) emails.add(email);
+    }
+    for (const branch of managers) {
+      if (branch.manager?.status !== 'ACTIVE') continue;
+      const email = branch.manager.email?.trim().toLowerCase();
       if (email) emails.add(email);
     }
     return [...emails];

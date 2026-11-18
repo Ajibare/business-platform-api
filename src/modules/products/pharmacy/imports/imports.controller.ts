@@ -1,53 +1,72 @@
 import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
-import { Role } from '@prisma/client';
 import { ImportsService } from './imports.service';
 import { CreateImportDto } from './dto/create-import.dto';
 import { ListImportsDto } from './dto/list-imports.dto';
-import { CurrentUser } from '../../../../common/decorators/current-user.decorator';
+import { CurrentActor } from '../../../../common/decorators/current-actor.decorator';
+import { CurrentBranch } from '../../../../common/decorators/current-branch.decorator';
+import { RequirePermission } from '../../../../common/decorators/require-permission.decorator';
 import { JwtAuthGuard } from '../../../../common/guards/jwt-auth.guard';
-import { RolesGuard } from '../../../../common/guards/roles.guard';
-import { Roles } from '../../../../common/decorators/roles.decorator';
+import { PermissionsGuard } from '../../../../common/guards/permissions.guard';
+import { BranchScopeGuard } from '../../../../common/guards/branch-scope.guard';
+import {
+  BranchAccessService,
+  type BranchScope,
+  type RequestActor,
+} from '../../../platform/branches/branch-access.service';
 
 @Controller('pharmacy/imports')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard, BranchScopeGuard)
 export class ImportsController {
-  constructor(private readonly importsService: ImportsService) {}
+  constructor(
+    private readonly importsService: ImportsService,
+    private readonly branchAccess: BranchAccessService,
+  ) {}
 
   @Get('templates/:type')
+  @RequirePermission('inventory:read')
   async template(@Param('type') type: string, @Query('format') format?: string) {
     const file = await this.importsService.getTemplateFile(type, format);
     return { data: file };
   }
 
   @Get('schema/:type')
+  @RequirePermission('inventory:read')
   schema(@Param('type') type: string) {
     return this.importsService.getSchema(type);
   }
 
   @Get()
+  @RequirePermission('inventory:read')
   list(
-    @CurrentUser('organisationId') organizationId: string,
+    @CurrentActor() actor: RequestActor,
     @Query() query: ListImportsDto,
   ) {
-    return this.importsService.list(organizationId, query);
+    return this.importsService.list(actor.organizationId, query);
   }
 
+  /**
+   * Validates a file and stores the accepted rows. The branch is captured on the
+   * job so the confirmation step writes stock into the same branch even if the
+   * browser switched branches in between.
+   */
   @Post()
-  @Roles(Role.OWNER, Role.MANAGER, Role.INVENTORY_STAFF)
-  validate(
-    @CurrentUser('organisationId') organizationId: string,
-    @CurrentUser('sub') userId: string,
+  @RequirePermission('inventory:receive')
+  async validate(
+    @CurrentActor() actor: RequestActor,
+    @CurrentBranch() scope: BranchScope,
     @Body() dto: CreateImportDto,
   ) {
-    return this.importsService.validateAndStore(organizationId, userId, dto);
+    const branchId = await this.branchAccess.writableBranchId(actor, scope);
+    return this.importsService.validateAndStore(actor.organizationId, actor.userId, branchId, dto);
   }
 
   @Get(':id/errors')
+  @RequirePermission('inventory:read')
   async errors(
-    @CurrentUser('organisationId') organizationId: string,
+    @CurrentActor() actor: RequestActor,
     @Param('id') id: string,
   ) {
-    const content = await this.importsService.errorReportCsv(organizationId, id);
+    const content = await this.importsService.errorReportCsv(actor.organizationId, id);
     return {
       data: {
         filename: `import-${id}-errors.csv`,
@@ -58,20 +77,22 @@ export class ImportsController {
   }
 
   @Get(':id')
+  @RequirePermission('inventory:read')
   findOne(
-    @CurrentUser('organisationId') organizationId: string,
+    @CurrentActor() actor: RequestActor,
     @Param('id') id: string,
   ) {
-    return this.importsService.findOne(organizationId, id);
+    return this.importsService.findOne(actor.organizationId, id);
   }
 
   @Post(':id/confirm')
-  @Roles(Role.OWNER, Role.MANAGER, Role.INVENTORY_STAFF)
-  confirm(
-    @CurrentUser('organisationId') organizationId: string,
-    @CurrentUser('sub') userId: string,
+  @RequirePermission('inventory:receive')
+  async confirm(
+    @CurrentActor() actor: RequestActor,
+    @CurrentBranch() scope: BranchScope,
     @Param('id') id: string,
   ) {
-    return this.importsService.confirm(organizationId, userId, id);
+    const branchId = await this.branchAccess.writableBranchId(actor, scope);
+    return this.importsService.confirm(actor.organizationId, actor.userId, branchId, id);
   }
 }

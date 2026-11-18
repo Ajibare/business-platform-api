@@ -68,6 +68,8 @@ function buildPrismaMock() {
     },
     product: { count: jest.fn().mockResolvedValue(0) },
     staffInvitation: { count: jest.fn().mockResolvedValue(0) },
+    branch: { findMany: jest.fn().mockResolvedValue([]) },
+    branchStaff: { findMany: jest.fn().mockResolvedValue([]) },
     $transaction: jest.fn(),
   };
 }
@@ -91,6 +93,9 @@ describe('AuthService', () => {
   };
   const email = { sendTransactional: jest.fn().mockResolvedValue(true), activeTransport: 'log' as const };
   const audit = { record: jest.fn().mockResolvedValue(undefined) };
+  const permissions = {
+    getEffectivePermissions: jest.fn().mockResolvedValue(new Set(['branch:all'])),
+  };
 
   const request = { headers: {}, ip: '10.0.0.1', socket: {} };
 
@@ -126,7 +131,7 @@ describe('AuthService', () => {
       defaultMinStockLevel: null,
       onboardingCompletedAt: null,
     });
-    prisma.membership.findUnique.mockResolvedValue({ role: 'OWNER', active: true });
+    prisma.membership.findUnique.mockResolvedValue({ role: 'OWNER', active: true, status: 'ACTIVE' });
     sessions.create.mockResolvedValue({
       sessionId: 'session-1',
       refreshToken: 'session-1.secret',
@@ -140,6 +145,7 @@ describe('AuthService', () => {
       rateLimit as never,
       email as never,
       audit as never,
+      permissions as never,
     );
   });
 

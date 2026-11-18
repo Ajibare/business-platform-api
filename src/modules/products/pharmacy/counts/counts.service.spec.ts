@@ -66,7 +66,7 @@ describe('CountsService', () => {
       ],
     });
 
-    const result = await service.create('org-1', 'user-1', { scope: 'ALL' });
+    const result = await service.create('org-1', 'branch-1', 'user-1', { scope: 'ALL' });
 
     expect(result.id).toBe('count-1');
     expect(result.status).toBe('DRAFT');
@@ -100,7 +100,7 @@ describe('CountsService', () => {
       versionAtCount: new Date(),
     });
 
-    const result = await service.addLine('org-1', 'count-1', {
+    const result = await service.addLine('org-1', ['branch-1'], 'count-1', {
       batchId: 'batch-1',
       countedQuantity: 12,
       note: 'physical count',
@@ -114,14 +114,16 @@ describe('CountsService', () => {
     prismaMock.stockCount.findFirst.mockResolvedValue({ id: 'count-1', status: 'SUBMITTED' });
 
     await expect(
-      service.addLine('org-1', 'count-1', { batchId: 'batch-1', countedQuantity: 12 }),
+      service.addLine('org-1', ['branch-1'], 'count-1', { batchId: 'batch-1', countedQuantity: 12 }),
     ).rejects.toThrow(BadRequestException);
   });
 
   it('rejects approving a draft count', async () => {
     prismaMock.stockCount.findFirst.mockResolvedValue({ id: 'count-1', status: 'DRAFT', lines: [] });
 
-    await expect(service.approve('org-1', 'count-1', 'user-2')).rejects.toThrow(BadRequestException);
+    await expect(service.approve('org-1', ['branch-1'], 'count-1', 'user-2')).rejects.toThrow(
+      BadRequestException,
+    );
   });
 
   it('approves a submitted count and records an adjustment movement', async () => {
@@ -157,7 +159,7 @@ describe('CountsService', () => {
       lines: [],
     });
 
-    const result = await service.approve('org-1', 'count-1', 'user-2');
+    const result = await service.approve('org-1', ['branch-1'], 'count-1', 'user-2');
 
     expect(result.status).toBe('APPROVED');
     expect(prismaMock.stockMovement.create).toHaveBeenCalledTimes(1);
@@ -167,6 +169,8 @@ describe('CountsService', () => {
   it('rejects approving an unknown count', async () => {
     prismaMock.stockCount.findFirst.mockResolvedValue(null);
 
-    await expect(service.approve('org-1', 'missing', 'user-2')).rejects.toThrow(NotFoundException);
+    await expect(service.approve('org-1', ['branch-1'], 'missing', 'user-2')).rejects.toThrow(
+      NotFoundException,
+    );
   });
 });

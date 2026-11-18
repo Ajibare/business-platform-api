@@ -15,6 +15,8 @@ import {
 
 export interface ExpiryBatchRecord {
   batchId: string;
+  branchId: string;
+  branchName: string;
   productId: string;
   medicineName: string;
   batchNumber: string | null;
@@ -26,6 +28,8 @@ export interface ExpiryBatchRecord {
 
 export interface ExpiryAlertItem {
   batchId: string;
+  branchId: string;
+  branchName: string;
   productId: string;
   medicineName: string;
   batchNumber: string | null;
@@ -63,6 +67,7 @@ export interface ExpiryAlerts {
 const BATCH_INCLUDE = {
   product: { select: { id: true, name: true, unit: true, active: true } },
   balance: { select: { quantity: true } },
+  branch: { select: { id: true, name: true } },
 } satisfies Prisma.BatchInclude;
 
 type BatchWithContext = Prisma.BatchGetPayload<{ include: typeof BATCH_INCLUDE }>;
@@ -78,6 +83,7 @@ export class ExpiryService {
    */
   async getAlerts(
     organizationId: string,
+    branchIds: string[],
     options: { windowDays?: number; search?: string } = {},
   ): Promise<{ data: ExpiryAlerts }> {
     const organization = await this.prisma.organization.findUnique({
@@ -94,6 +100,7 @@ export class ExpiryService {
     const batches = await this.prisma.batch.findMany({
       where: {
         organizationId,
+        branchId: { in: branchIds },
         expiryDate: { not: null },
         product: { active: true },
         // Searching matches the batch number or the medicine, never only one of them.
@@ -141,6 +148,8 @@ export class ExpiryService {
 
       items.push({
         batchId: batch.id,
+        branchId: batch.branchId,
+        branchName: batch.branch.name,
         productId: batch.productId,
         medicineName: batch.product.name,
         batchNumber: batch.batchNumber,
@@ -196,12 +205,17 @@ export class ExpiryService {
     };
   }
 
-  async findNear(organizationId: string, warningDays: number): Promise<{ data: ExpiryBatchRecord[] }> {
+  async findNear(
+    organizationId: string,
+    branchIds: string[],
+    warningDays: number,
+  ): Promise<{ data: ExpiryBatchRecord[] }> {
     const windowDays = this.clampWindow(warningDays);
     const threshold = new Date(Date.now() + windowDays * 24 * 60 * 60 * 1000);
     const batches = await this.prisma.batch.findMany({
       where: {
         organizationId,
+        branchId: { in: branchIds },
         expiryDate: { not: null, gt: new Date(), lte: threshold },
       },
       include: BATCH_INCLUDE,
@@ -211,9 +225,12 @@ export class ExpiryService {
     return { data: this.toRecords(batches, (batch) => Boolean(batch.expiryDate)) };
   }
 
-  async findExpired(organizationId: string): Promise<{ data: ExpiryBatchRecord[] }> {
+  async findExpired(
+    organizationId: string,
+    branchIds: string[],
+  ): Promise<{ data: ExpiryBatchRecord[] }> {
     const batches = await this.prisma.batch.findMany({
-      where: { organizationId, expiryDate: { not: null, lt: new Date() } },
+      where: { organizationId, branchId: { in: branchIds }, expiryDate: { not: null, lt: new Date() } },
       include: BATCH_INCLUDE,
       orderBy: { expiryDate: 'asc' },
     });
@@ -221,9 +238,12 @@ export class ExpiryService {
     return { data: this.toRecords(batches, (batch) => Boolean(batch.expiryDate)) };
   }
 
-  async findUnknown(organizationId: string): Promise<{ data: ExpiryBatchRecord[] }> {
+  async findUnknown(
+    organizationId: string,
+    branchIds: string[],
+  ): Promise<{ data: ExpiryBatchRecord[] }> {
     const batches = await this.prisma.batch.findMany({
-      where: { organizationId, expiryDate: null },
+      where: { organizationId, branchId: { in: branchIds }, expiryDate: null },
       include: BATCH_INCLUDE,
       orderBy: { createdAt: 'desc' },
       take: 100,
@@ -244,6 +264,8 @@ export class ExpiryService {
       const unitCost = batch.unitCost === null ? null : this.toQuantity(batch.unitCost);
       items.push({
         batchId: batch.id,
+        branchId: batch.branchId,
+        branchName: batch.branch.name,
         productId: batch.productId,
         medicineName: batch.product.name,
         batchNumber: batch.batchNumber,

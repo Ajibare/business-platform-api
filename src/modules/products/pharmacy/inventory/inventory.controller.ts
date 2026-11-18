@@ -2,30 +2,51 @@ import { Body, Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
 import { InventoryService } from './inventory.service';
 import { CreateMovementDto } from './dto/create-movement.dto';
 import { ListMovementsDto } from './dto/list-movements.dto';
-import { CurrentUser } from '../../../../common/decorators/current-user.decorator';
+import { CurrentActor } from '../../../../common/decorators/current-actor.decorator';
+import { CurrentBranch } from '../../../../common/decorators/current-branch.decorator';
+import { RequirePermission } from '../../../../common/decorators/require-permission.decorator';
 import { JwtAuthGuard } from '../../../../common/guards/jwt-auth.guard';
-import { RolesGuard } from '../../../../common/guards/roles.guard';
-import { Roles } from '../../../../common/decorators/roles.decorator';
-import { Role } from '@prisma/client';
+import { PermissionsGuard } from '../../../../common/guards/permissions.guard';
+import { BranchScopeGuard } from '../../../../common/guards/branch-scope.guard';
+import {
+  BranchAccessService,
+  type BranchScope,
+  type RequestActor,
+} from '../../../platform/branches/branch-access.service';
 
 @Controller('pharmacy/movements')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard, BranchScopeGuard)
 export class InventoryController {
-  constructor(private readonly inventoryService: InventoryService) {}
+  constructor(
+    private readonly inventoryService: InventoryService,
+    private readonly branchAccess: BranchAccessService,
+  ) {}
 
   @Post()
-  @Roles(Role.OWNER, Role.MANAGER, Role.INVENTORY_STAFF)
+  @RequirePermission('inventory:adjust')
   async create(
-    @CurrentUser('organisationId') organizationId: string,
-    @CurrentUser('sub') userId: string,
+    @CurrentActor() actor: RequestActor,
+    @CurrentBranch() scope: BranchScope,
     @Body() dto: CreateMovementDto,
   ) {
-    const movement = await this.inventoryService.create(organizationId, userId, dto);
+    // A movement changes stock, so it must belong to one active branch.
+    const branchId = await this.branchAccess.writableBranchId(actor, scope);
+    const movement = await this.inventoryService.create(
+      actor.organizationId,
+      branchId,
+      actor.userId,
+      dto,
+    );
     return { data: movement };
   }
 
   @Get()
-  findAll(@CurrentUser('organisationId') organizationId: string, @Query() query: ListMovementsDto) {
-    return this.inventoryService.findAll(organizationId, query);
+  @RequirePermission('inventory:read')
+  findAll(
+    @CurrentActor() actor: RequestActor,
+    @CurrentBranch('branchIds') branchIds: string[],
+    @Query() query: ListMovementsDto,
+  ) {
+    return this.inventoryService.findAll(actor.organizationId, branchIds, query);
   }
 }

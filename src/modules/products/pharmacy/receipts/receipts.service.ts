@@ -16,6 +16,7 @@ export interface ReceiptLineRecord {
 export interface ReceiptRecord {
   id: string;
   organizationId: string;
+  branchId: string;
   supplierId: string | null;
   externalReference: string | null;
   status: string;
@@ -28,7 +29,13 @@ export interface ReceiptRecord {
 export class ReceiptsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async create(organizationId: string, actorId: string, dto: CreateReceiptDto): Promise<ReceiptRecord> {
+  /** Stock is received into one branch; that branch owns the batches it creates. */
+  async create(
+    organizationId: string,
+    branchId: string,
+    actorId: string,
+    dto: CreateReceiptDto,
+  ): Promise<ReceiptRecord> {
     for (const line of dto.lines) {
       const product = await this.prisma.product.findFirst({
         where: { id: line.productId, organizationId },
@@ -53,6 +60,7 @@ export class ReceiptsService {
     const receipt = await this.prisma.stockReceipt.create({
       data: {
         organizationId,
+        branchId,
         supplierId: dto.supplierId ?? null,
         externalReference: dto.externalReference ?? null,
         status: 'DRAFT',
@@ -75,9 +83,14 @@ export class ReceiptsService {
     return this.toRecord(receipt as never, organizationId);
   }
 
-  async confirm(organizationId: string, id: string, actorId: string): Promise<ReceiptRecord> {
+  async confirm(
+    organizationId: string,
+    branchIds: string[],
+    id: string,
+    actorId: string,
+  ): Promise<ReceiptRecord> {
     const receipt = await this.prisma.stockReceipt.findFirst({
-      where: { id, organizationId },
+      where: { id, organizationId, branchId: { in: branchIds } },
       include: { lines: true },
     });
     if (!receipt) {
@@ -105,6 +118,7 @@ export class ReceiptsService {
         const batch = await tx.batch.create({
           data: {
             organizationId,
+            branchId: receipt.branchId,
             productId: line.productId,
             batchNumber: line.batchNumber ?? null,
             expiryDate: line.expiryDate ?? null,
@@ -117,6 +131,7 @@ export class ReceiptsService {
         await tx.stockMovement.create({
           data: {
             organizationId,
+            branchId: receipt.branchId,
             batchId: batch.id,
             type: 'RECEIPT',
             quantityDelta: this.toQuantity(line.quantity),
@@ -152,6 +167,7 @@ export class ReceiptsService {
     const record = receipt as unknown as {
       id: string;
       organizationId: string;
+      branchId: string;
       supplierId: string | null;
       externalReference: string | null;
       status: string;
@@ -162,6 +178,7 @@ export class ReceiptsService {
     return {
       id: record.id,
       organizationId: record.organizationId,
+      branchId: record.branchId,
       supplierId: record.supplierId,
       externalReference: record.externalReference,
       status: record.status,

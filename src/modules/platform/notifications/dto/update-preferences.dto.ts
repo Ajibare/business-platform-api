@@ -36,6 +36,14 @@ export class UpdateNotificationPreferencesDto {
   @IsBoolean()
   dailyReportEnabled?: boolean;
 
+  /**
+   * When true every active branch receives its own report; when false one
+   * consolidated email covers the whole organisation.
+   */
+  @IsOptional()
+  @IsBoolean()
+  dailyReportPerBranch?: boolean;
+
   /** Local delivery time, evaluated in `dailyReportTimezone`. */
   @IsOptional()
   @IsString()

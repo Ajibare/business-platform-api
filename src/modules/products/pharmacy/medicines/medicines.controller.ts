@@ -5,64 +5,92 @@ import { CreateMedicineDto } from './dto/create-medicine.dto';
 import { BulkCreateMedicinesDto } from './dto/bulk-create-medicines.dto';
 import { UpdateMedicineDto } from './dto/update-medicine.dto';
 import { ListMedicinesDto } from './dto/list-medicines.dto';
-import { CurrentUser } from '../../../../common/decorators/current-user.decorator';
+import { CurrentActor } from '../../../../common/decorators/current-actor.decorator';
+import { CurrentBranch } from '../../../../common/decorators/current-branch.decorator';
+import { RequirePermission } from '../../../../common/decorators/require-permission.decorator';
 import { JwtAuthGuard } from '../../../../common/guards/jwt-auth.guard';
-import { RolesGuard } from '../../../../common/guards/roles.guard';
-import { Roles } from '../../../../common/decorators/roles.decorator';
-import { Role } from '@prisma/client';
+import { PermissionsGuard } from '../../../../common/guards/permissions.guard';
+import { BranchScopeGuard } from '../../../../common/guards/branch-scope.guard';
+import {
+  BranchAccessService,
+  type BranchScope,
+  type RequestActor,
+} from '../../../platform/branches/branch-access.service';
 
 @Controller('pharmacy/medicines')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard, BranchScopeGuard)
 export class MedicinesController {
   constructor(
     private readonly medicinesService: MedicinesService,
     private readonly bulkMedicinesService: BulkMedicinesService,
+    private readonly branchAccess: BranchAccessService,
   ) {}
 
   @Get()
-  findAll(@CurrentUser('organisationId') organizationId: string, @Query() query: ListMedicinesDto) {
-    return this.medicinesService.findAll(organizationId, query);
+  @RequirePermission('product:read')
+  findAll(
+    @CurrentActor() actor: RequestActor,
+    @CurrentBranch('branchIds') branchIds: string[],
+    @Query() query: ListMedicinesDto,
+  ) {
+    return this.medicinesService.findAll(actor.organizationId, branchIds, query);
   }
 
   @Post()
-  @Roles(Role.OWNER, Role.MANAGER, Role.INVENTORY_STAFF)
+  @RequirePermission('product:manage')
   async create(
-    @CurrentUser('organisationId') organizationId: string,
-    @CurrentUser('sub') userId: string,
+    @CurrentActor() actor: RequestActor,
     @Body() dto: CreateMedicineDto,
   ) {
-    const medicine = await this.medicinesService.create(organizationId, userId, dto);
+    const medicine = await this.medicinesService.create(actor.organizationId, actor.userId, dto);
     return { data: medicine };
   }
 
   /**
    * Creates up to 100 medicines, with optional opening batches, in one request.
-   * Each row succeeds or fails on its own and the response reports both.
+   * Opening stock lands in the branch the request is working in.
    */
   @Post('bulk')
-  @Roles(Role.OWNER, Role.MANAGER, Role.INVENTORY_STAFF)
+  @RequirePermission('product:manage')
   async createMany(
-    @CurrentUser('organisationId') organizationId: string,
-    @CurrentUser('sub') userId: string,
+    @CurrentActor() actor: RequestActor,
+    @CurrentBranch() scope: BranchScope,
     @Body() dto: BulkCreateMedicinesDto,
   ) {
-    const result = await this.bulkMedicinesService.createMany(organizationId, userId, dto);
+    const branchId = await this.branchAccess.writableBranchId(actor, scope);
+    const result = await this.bulkMedicinesService.createMany(
+      actor.organizationId,
+      branchId,
+      actor.userId,
+      dto,
+    );
     return { data: result };
   }
 
   @Get(':id')
-  findOne(@CurrentUser('organisationId') organizationId: string, @Param('id') id: string) {
-    return this.medicinesService.findOne(organizationId, id);
+  @RequirePermission('product:read')
+  findOne(
+    @CurrentActor() actor: RequestActor,
+    @CurrentBranch('branchIds') branchIds: string[],
+    @Param('id') id: string,
+  ) {
+    return this.medicinesService.findOne(actor.organizationId, branchIds, id);
   }
 
   @Patch(':id')
-  @Roles(Role.OWNER, Role.MANAGER)
+  @RequirePermission('product:manage')
   async update(
-    @CurrentUser('organisationId') organizationId: string,
+    @CurrentActor() actor: RequestActor,
+    @CurrentBranch('branchIds') branchIds: string[],
     @Param('id') id: string,
     @Body() dto: UpdateMedicineDto,
   ) {
-    const medicine = await this.medicinesService.update(organizationId, id, dto);
+    const medicine = await this.medicinesService.update(
+      actor.organizationId,
+      branchIds,
+      id,
+      dto,
+    );
     return { data: medicine };
   }
 }

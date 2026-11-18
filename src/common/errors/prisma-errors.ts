@@ -18,8 +18,10 @@ export interface DescribedError {
 
 const DATABASE_DOWN_CODES = new Set(['P1000', 'P1001', 'P1002', 'P1008', 'P1017', 'P2024']);
 
+// Migration history lives in `prisma/migrations`, so every environment applies it
+// with `migrate deploy`; `migrate dev` is only for authoring a new migration locally.
 const SCHEMA_BEHIND_HINT =
-  'The database schema is behind the application schema. Run `npx prisma migrate deploy` (or `npx prisma migrate dev` locally) and restart the API.';
+  'The database schema is behind the application schema, or has not been created. Run `npx prisma migrate deploy` against this environment, then restart the API.';
 
 const DATABASE_DOWN_MESSAGE =
   'The service is temporarily unavailable. Please try again in a moment.';

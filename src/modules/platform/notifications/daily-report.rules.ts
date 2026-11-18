@@ -60,6 +60,8 @@ export function formatReportDate(dateKey: string): string {
 
 export interface DailyReportCopyInput {
   organizationName: string;
+  /** Set when the report covers a single branch. */
+  branchName?: string | null;
   currency: string;
   date: string;
   timeZone: string;
@@ -74,9 +76,12 @@ export interface DailyReportCopyInput {
 export function buildDailyReportCopy(input: DailyReportCopyInput): { title: string; body: string } {
   const { summary, currency } = input;
   const money = (amount: number) => formatMoney(amount, currency);
+  const scope = input.branchName
+    ? `${input.organizationName} — ${input.branchName}`
+    : `${input.organizationName} (all branches)`;
 
   const lines = [
-    `${input.organizationName} — daily sales summary for ${formatReportDate(input.date)} (${input.timeZone}).`,
+    `${scope} — daily sales summary for ${formatReportDate(input.date)} (${input.timeZone}).`,
     `Total sales revenue: ${money(summary.revenue)}.`,
     `Sales transactions: ${summary.transactions}.`,
     `Units sold: ${summary.unitsSold}.`,
@@ -97,11 +102,15 @@ export function buildDailyReportCopy(input: DailyReportCopyInput): { title: stri
   ];
 
   return {
-    title: `${input.organizationName} daily sales summary — ${formatReportDate(input.date)}`,
+    title: `${scope} daily sales summary — ${formatReportDate(input.date)}`,
     body: lines.join(' '),
   };
 }
 
-export function dailyReportDedupeKey(dateKey: string): string {
-  return `daily-report:${dateKey}`;
+/**
+ * One key per business date, and per branch when the report is split by branch,
+ * so a scheduler that runs every few minutes creates each report only once.
+ */
+export function dailyReportDedupeKey(dateKey: string, branchId?: string | null): string {
+  return branchId ? `daily-report:${dateKey}:branch:${branchId}` : `daily-report:${dateKey}`;
 }

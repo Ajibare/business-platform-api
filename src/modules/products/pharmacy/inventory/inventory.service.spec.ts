@@ -31,7 +31,7 @@ describe('InventoryService', () => {
   it('rejects adjustments without a reason', async () => {
     prismaMock.batch.findFirst.mockResolvedValue({ id: 'batch-1', organizationId: 'org-1' });
     await expect(
-      service.create('org-1', 'user-1', {
+      service.create('org-1', 'branch-1', 'user-1', {
         batchId: 'batch-1',
         type: 'ADJUSTMENT',
         quantityDelta: 5,
@@ -46,7 +46,7 @@ describe('InventoryService', () => {
     prismaMock.stockMovement.findUnique.mockResolvedValue(null);
 
     await expect(
-      service.create('org-1', 'user-1', {
+      service.create('org-1', 'branch-1', 'user-1', {
         batchId: 'batch-1',
         type: 'ISSUE',
         quantityDelta: -5,

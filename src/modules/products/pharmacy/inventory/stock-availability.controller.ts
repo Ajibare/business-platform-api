@@ -1,24 +1,30 @@
 import { Controller, Get, Query, UseGuards } from '@nestjs/common';
 import { InventoryService } from './inventory.service';
 import { ListStockDto } from './dto/list-stock.dto';
-import { CurrentUser } from '../../../../common/decorators/current-user.decorator';
+import { CurrentActor } from '../../../../common/decorators/current-actor.decorator';
+import { CurrentBranch } from '../../../../common/decorators/current-branch.decorator';
+import { RequirePermission } from '../../../../common/decorators/require-permission.decorator';
 import { JwtAuthGuard } from '../../../../common/guards/jwt-auth.guard';
-import { RolesGuard } from '../../../../common/guards/roles.guard';
+import { PermissionsGuard } from '../../../../common/guards/permissions.guard';
+import { BranchScopeGuard } from '../../../../common/guards/branch-scope.guard';
+import type { RequestActor } from '../../../platform/branches/branch-access.service';
 
 @Controller('pharmacy/inventory')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard, BranchScopeGuard)
 export class StockAvailabilityController {
   constructor(private readonly inventoryService: InventoryService) {}
 
   /**
-   * Sellable quantity per medicine. Used by the sales screen so staff can see
-   * what can actually be sold before recording a sale.
+   * Sellable quantity per medicine in the branches the caller can reach. Used
+   * by the sales screen to show what can actually be sold right now.
    */
   @Get('stock')
+  @RequirePermission('inventory:read')
   findStock(
-    @CurrentUser('organisationId') organizationId: string,
+    @CurrentActor() actor: RequestActor,
+    @CurrentBranch('branchIds') branchIds: string[],
     @Query() query: ListStockDto,
   ) {
-    return this.inventoryService.stockOnHand(organizationId, query);
+    return this.inventoryService.stockOnHand(actor.organizationId, branchIds, query);
   }
 }

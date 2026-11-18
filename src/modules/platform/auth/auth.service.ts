@@ -14,6 +14,7 @@ import * as bcrypt from 'bcryptjs';
 import { PrismaService } from '../../../database/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { EmailService } from '../notifications/email.service';
+import { PermissionsService } from '../permissions/permissions.service';
 import {
   ACCESS_TOKEN_TTL_SECONDS,
   GENERIC_LOGIN_ERROR,
@@ -108,7 +109,14 @@ export interface AuthProfile {
     defaultMinStockLevel: number | null;
     onboardingCompletedAt: string | null;
   };
-  membership: { role: string; active: boolean };
+  membership: { role: string; active: boolean; status: string };
+  /**
+   * The permission keys this member holds, so the interface can show only the
+   * destinations they may actually use.
+   */
+  permissions: string[];
+  /** Branches the member may work in; the switcher is built from this list. */
+  branches: { id: string; name: string; code: string; isDefault: boolean }[];
   onboarding: OnboardingSummary;
   /** Where the client should land after authentication. */
   nextPath: string;
@@ -147,6 +155,7 @@ export class AuthService {
     private readonly rateLimit: RateLimitService,
     private readonly email: EmailService,
     private readonly audit: AuditService,
+    private readonly permissionsService: PermissionsService,
   ) {}
 
   // ---------------------------------------------------------------- registration
@@ -932,7 +941,7 @@ export class AuthService {
         this.prisma.organization.findUnique({ where: { id: organisationId } }),
         this.prisma.membership.findUnique({
           where: { organizationId_userId: { organizationId: organisationId, userId } },
-          select: { role: true, active: true },
+          select: { role: true, active: true, status: true },
         }),
         this.prisma.onboardingProgress.findUnique({ where: { organizationId: organisationId } }),
         this.prisma.membership.count({ where: { organizationId: organisationId, active: true } }),
@@ -945,6 +954,13 @@ export class AuthService {
         message: 'You do not have access to this workspace.',
       });
     }
+
+    const permissions = await this.permissionsService.getEffectivePermissions(
+      organisationId,
+      userId,
+      membership.role,
+    );
+    const branches = await this.branchesFor(organisationId, userId, permissions);
 
     const summary = buildOnboardingSummary({
       status: onboarding?.status,
@@ -987,7 +1003,9 @@ export class AuthService {
           ? organisation.onboardingCompletedAt.toISOString()
           : null,
       },
-      membership: { role: membership.role, active: membership.active },
+      membership: { role: membership.role, active: membership.active, status: membership.status },
+      permissions: [...permissions].sort(),
+      branches,
       onboarding: summary,
       // Only the Owner can run the setup wizard; staff who join mid-setup go
       // straight to the dashboard instead of a step they cannot save.
@@ -996,6 +1014,31 @@ export class AuthService {
           ? '/onboarding/pharmacy-setup'
           : '/dashboard',
     };
+  }
+
+  /**
+   * The branches a member can work in. `branch:all` opens every branch;
+   * otherwise only the branches the member is assigned to are returned.
+   */
+  private async branchesFor(
+    organizationId: string,
+    userId: string,
+    permissions: Set<string>,
+  ): Promise<AuthProfile['branches']> {
+    if (permissions.has('branch:all')) {
+      return this.prisma.branch.findMany({
+        where: { organizationId },
+        select: { id: true, name: true, code: true, isDefault: true },
+        orderBy: [{ isDefault: 'desc' }, { name: 'asc' }],
+      });
+    }
+
+    const assignments = await this.prisma.branchStaff.findMany({
+      where: { userId, branch: { organizationId } },
+      select: { branch: { select: { id: true, name: true, code: true, isDefault: true } } },
+      orderBy: { branch: { name: 'asc' } },
+    });
+    return assignments.map((assignment) => assignment.branch);
   }
 
   private accountLocked(until: Date, now: Date) {
